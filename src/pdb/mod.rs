@@ -27,7 +27,7 @@ use crate::util::ColorIndex;
 use binrw::{
     binread, binrw,
     io::{Read, Seek, SeekFrom, Write},
-    BinRead, BinResult, BinWrite, Endian, FilePtr16, FilePtr8,
+    BinRead, BinResult, BinWrite, Endian, FilePtr16,
 };
 
 /// Do not read anything, but the return the current stream position of `reader`.
@@ -81,6 +81,12 @@ pub enum PageType {
     /// Contains the metadata categories by which Tracks can be browsed by.
     #[brw(magic = 16u32)]
     Columns,
+    /// tbi
+    #[brw(magic = 17u32)]
+    PageType17,
+    /// tbi
+    #[brw(magic = 18u32)]
+    PageType18,
     /// Holds information used by rekordbox to synchronize history playlists (not yet studied).
     #[brw(magic = 19u32)]
     History,
@@ -93,7 +99,7 @@ pub enum PageType {
 #[binrw]
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd)]
 #[brw(little)]
-pub struct PageIndex(u32);
+pub struct PageIndex(pub u32);
 
 impl PageIndex {
     /// Calculate the absolute file offset of the page in the PDB file for the given `page_size`.
@@ -172,9 +178,12 @@ impl Header {
         let mut pages = vec![];
         let mut page_index = first_page.clone();
         loop {
+            println!("{:?}", page_index);
             let page_offset = SeekFrom::Start(page_index.offset(self.page_size));
             reader.seek(page_offset).map_err(binrw::Error::Io)?;
             let page = Page::read_options(reader, endian, (self.page_size,))?;
+            println!(" {:?}", page);
+
             let is_last_page = &page.page_index == last_page;
             page_index = page.next_page.clone();
             pages.push(page);
@@ -297,6 +306,7 @@ pub struct Page {
     ///
     /// Used when the number of rows does not fit into a single byte. In that case,`num_rows_large`
     /// is greater than `num_rows_small`, but is not equal to `0x1FFF`.
+    /// TODO make this an option with 0x1FFF <=> None
     pub num_rows_large: u16,
     /// Unknown field.
     #[allow(dead_code)]
@@ -547,12 +557,6 @@ pub struct HistoryPlaylistId(pub u32);
 #[derive(Debug, PartialEq, Eq, Clone)]
 #[brw(little)]
 pub struct Album {
-    /// Position of start of this row (needed of offset calculations).
-    ///
-    /// **Note:** This is a virtual field and not actually read from the file.
-    #[br(temp, parse_with = current_offset)]
-    #[bw(ignore)]
-    base_offset: u64,
     /// Unknown field, usually `80 00`.
     unknown1: u16,
     /// Unknown field, called `index_shift` by [@flesniak](https://github.com/flesniak).
@@ -567,9 +571,23 @@ pub struct Album {
     unknown3: u32,
     /// Unknown field.
     unknown4: u8,
+    /// Name offset
+    ofs_name: u8,
     /// Album name String
-    #[br(offset = base_offset, parse_with = FilePtr8::parse)]
+    #[br(seek_before = Album::calculate_name_seek(ofs_name))]
+    #[bw(seek_before = Album::calculate_name_seek(*ofs_name))]
     name: DeviceSQLString,
+}
+
+impl Album {
+    /// Size of the album header in bytes.
+    pub const HEADER_SIZE: u8 = 0x16;
+
+    fn calculate_name_seek(ofs_name: u8) -> SeekFrom {
+        println!("ofs_name: {}", ofs_name);
+        let offset: u8 = ofs_name - Self::HEADER_SIZE;
+        SeekFrom::Current(offset.into())
+    }
 }
 
 /// Contains the artist name and ID.
@@ -595,14 +613,24 @@ pub struct Artist {
     /// Name of this artist.
     #[br(seek_before = Artist::calculate_name_seek(ofs_name_near, &ofs_name_far))]
     #[bw(seek_before = Artist::calculate_name_seek(*ofs_name_near, ofs_name_far))]
-    #[brw(restore_position)]
+    //#[brw(restore_position)]
     name: DeviceSQLString,
 }
 
 impl Artist {
+    /// Size of the artist header for the near variant in bytes.
+    pub const HEADER_SIZE_NEAR: u8 = 0x0a;
+
+    /// Size of the artist header for the far variant in bytes.
+    pub const HEADER_SIZE_FAR: u16 = 0x0c;
+
     fn calculate_name_seek(ofs_near: u8, ofs_far: &Option<u16>) -> SeekFrom {
-        let offset: u16 = ofs_far.map_or_else(|| ofs_near.into(), |v| v - 2) - 10;
-        SeekFrom::Current(offset.into())
+        dbg!(ofs_near);
+        SeekFrom::Current(if let Some(ofs_far) = ofs_far {
+            (ofs_far - Self::HEADER_SIZE_FAR).into()
+        } else {
+            (ofs_near - Self::HEADER_SIZE_NEAR).into()
+        })
     }
 }
 
@@ -632,6 +660,16 @@ pub struct Color {
     unknown3: u16,
     /// User-defined name of the color.
     name: DeviceSQLString,
+
+    // TODO: The following unknowns fields' conditions can be simplified
+    #[brw(if(name.clone().into_string().unwrap().len() % 2 == 0 && name.clone().into_string().unwrap().len() <= 5))]
+    unknown4: u16,
+
+    #[brw(if(name.clone().into_string().unwrap().len() % 2 == 0 || name.clone().into_string().unwrap().len() > 5))]
+    unknown5: u8,
+
+    #[brw(if(name.clone().into_string().unwrap().len() == 5))]
+    unknown6: u16,
 }
 
 /// Represents a musical genre.
@@ -710,6 +748,8 @@ pub struct PlaylistTreeNode {
     node_is_folder: u32,
     /// Name of this node, as shown when navigating the menu.
     pub name: DeviceSQLString,
+    /// Unknown field.
+    unknown1: u16,
 }
 
 impl PlaylistTreeNode {
@@ -733,7 +773,7 @@ pub struct PlaylistEntry {
     playlist_id: PlaylistTreeNodeId,
 }
 
-/// Contains the kinds of Metadata Categories tracks can be browsed by
+/// Contains the kinds of Metadata Categories tracks that can be browsed by
 /// on CDJs.
 #[binrw]
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -754,8 +794,18 @@ pub struct ColumnEntry {
     // TODO since there are only finite many categories, it would make sense
     // to encode those as an enum as part of the high-level api.
     pub column_name: DeviceSQLString,
+
+    #[brw(if(ColumnEntry::has_padding(column_name.clone())))]
+    unknown1: u16,
 }
 
+impl ColumnEntry {
+    fn has_padding(column_name: DeviceSQLString) -> bool {
+        let column_name_len = column_name.into_string().unwrap().len();
+
+        column_name_len % 2 != 0 && column_name_len <= 21
+    }
+}
 /// Contains the album name, along with an ID of the corresponding artist.
 #[binread]
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -1069,8 +1119,17 @@ pub enum Row {
     /// Contains the album name, along with an ID of the corresponding artist.
     #[br(pre_assert(page_type == PageType::Tracks))]
     Track(Track),
+    /// Placeholder
+    #[br(pre_assert(page_type == PageType::PageType17))]
+    Row17(u64),
+    /// Placeholder
+    #[br(pre_assert(page_type == PageType::PageType18))]
+    Row18(u64),
+    /// Placeholder
+    #[br(pre_assert(page_type == PageType::History))]
+    History((u64, u64, u64, u64, u64)),
     /// The row format (and also its size) is unknown, which means it can't be parsed.
-    #[br(pre_assert(matches!(page_type, PageType::History | PageType::Unknown(_))))]
+    #[br(pre_assert(matches!(page_type, PageType::Unknown(_))))]
     Unknown,
 }
 
@@ -1103,6 +1162,9 @@ impl Row {
             PlaylistEntry(r) => type_to_opt_align(r),
             Track(r) => type_to_opt_align(r),
             Unknown => None,
+            Row17(_) => todo!(),
+            Row18(_) => todo!(),
+            History(_) => todo!(),
         }
     }
 }
@@ -1241,13 +1303,13 @@ mod test {
                     last_page: PageIndex(34),
                 },
                 Table {
-                    page_type: PageType::Unknown(17),
+                    page_type: PageType::PageType17,
                     empty_candidate: 44,
                     first_page: PageIndex(35),
                     last_page: PageIndex(36),
                 },
                 Table {
-                    page_type: PageType::Unknown(18),
+                    page_type: PageType::PageType18,
                     empty_candidate: 45,
                     first_page: PageIndex(37),
                     last_page: PageIndex(38),
@@ -1418,8 +1480,14 @@ mod test {
             color: ColorIndex::Pink,
             unknown3: 0,
             name: "Pink".parse().unwrap(),
+            unknown4: 0,
+            unknown5: 0,
+            unknown6: 0,
         };
-        test_roundtrip(&[0, 0, 0, 0, 1, 1, 0, 0, 11, 80, 105, 110, 107], row);
+        test_roundtrip(
+            &[0, 0, 0, 0, 1, 1, 0, 0, 11, 80, 105, 110, 107, 0, 0, 0],
+            row,
+        );
     }
 
     #[test]
@@ -1428,10 +1496,11 @@ mod test {
             id: 1,
             unknown0: 128,
             column_name: "\u{fffa}GENRE\u{fffb}".parse().unwrap(),
+            unknown1: 0,
         };
         let bin = &[
             0x01, 0x00, 0x80, 0x00, 0x90, 0x12, 0x00, 0x00, 0xfa, 0xff, 0x47, 0x00, 0x45, 0x00,
-            0x4e, 0x00, 0x52, 0x00, 0x45, 0x00, 0xfb, 0xff,
+            0x4e, 0x00, 0x52, 0x00, 0x45, 0x00, 0xfb, 0xff, 0x00, 0x00,
         ];
         test_roundtrip(bin, row);
     }
