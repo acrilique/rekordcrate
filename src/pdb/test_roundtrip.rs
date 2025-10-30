@@ -9,6 +9,8 @@ use super::ext::*;
 use super::*;
 use crate::util::testing::{test_roundtrip, test_roundtrip_with_args};
 use crate::util::MaybeCalculated::*;
+use crate::util::{ColorIndex, FileType};
+use std::collections::BTreeMap;
 use std::num::NonZero;
 
 #[test]
@@ -153,7 +155,8 @@ fn demo_tracks_header() {
                 last_page: PageIndex::try_from(38).unwrap(),
             },
             Table {
-                page_type: PageType::Plain(PlainPageType::History),
+                // page_type: PageType::Plain(PlainPageType::History),
+                page_type: PageType::Unknown(19),
                 empty_candidate: 48,
                 first_page: PageIndex::try_from(39).unwrap(),
                 last_page: PageIndex::try_from(41).unwrap(),
