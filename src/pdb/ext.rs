@@ -111,7 +111,7 @@ pub struct TrackTag {
 /// The type of ext pages found inside a `Table`.
 #[binrw]
 #[brw(little)]
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
 pub enum ExtPageType {
     /// can be assigned to tracks for the purpose of categorization.
     #[brw(magic = 3u32)]

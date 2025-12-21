@@ -86,7 +86,7 @@ pub enum PageType {
 
 /// The type of pages found inside a `Table` of export.pdb files.
 #[binrw]
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
 #[brw(little)]
 pub enum PlainPageType {
     /// Holds rows of track metadata, such as title, artist, genre, artwork ID, playing time, etc.
