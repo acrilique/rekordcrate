@@ -93,9 +93,8 @@ pub struct TagOrCategory {
     pub id: TagId,
     /// Non-zero if this row represents a category rather than a tag.
     pub raw_is_category: u32,
-    // Padded at the end by 11 bytes as observed
-    #[brw(args(0x1C, subtype.get_offset_size(), ()), pad_after = 11)]
     /// The strings associated with this tag or category.
+    #[brw(args(0x1C, subtype.get_offset_size(), ()))]
     pub offsets: OffsetArrayContainer<TagOrCategoryStrings, 2>,
 }
 
