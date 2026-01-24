@@ -73,6 +73,16 @@ impl From<usize> for TableIndex {
     }
 }
 
+/// Wrapper for types which may be automatically calculated if not
+/// provided by the user, or may be explicitly set when parsing existing data.
+#[derive(Debug, PartialEq, Clone, Eq)]
+pub enum MaybeCalculated<T> {
+    /// Value is calculated from some other value during serialization.
+    Calculated,
+    /// Value is explicitly provided.
+    Provided(T),
+}
+
 /// Indexed Color identifiers used for memory cues and tracks.
 #[binrw]
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -248,6 +258,17 @@ pub(crate) mod testing {
         ($cond:expr, $expected:expr) => {
             assert_eq!(pretty_hex($cond), pretty_hex($expected));
         };
+    }
+
+    pub fn test_write<'a, T>(bin: &[u8], obj: &T, args: <T as binrw::BinWrite>::Args<'a>)
+    where
+        T: BinWrite + PartialEq + core::fmt::Debug + WriteEndian,
+    {
+        let endian = Endian::NATIVE;
+        // T->binary
+        let mut writer = binrw::io::Cursor::new(Vec::with_capacity(bin.len()));
+        obj.write_options(&mut writer, endian, args).unwrap();
+        assert_eq_hex!(&writer.get_ref(), &bin);
     }
 
     pub fn test_roundtrip_with_args<'a, T>(
