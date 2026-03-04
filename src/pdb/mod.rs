@@ -651,6 +651,48 @@ impl DataPageContent {
     }
 }
 
+trait PageHeapObject {
+    type Args<'a>;
+
+    /// Required page heap space in bytes to store the object.
+    fn heap_bytes_required(&self, args: Self::Args<'_>) -> u16;
+}
+
+impl PageHeapObject for u8 {
+    type Args<'a> = ();
+    fn heap_bytes_required(&self, _: ()) -> u16 {
+        std::mem::size_of::<u8>() as u16
+    }
+}
+
+impl PageHeapObject for u16 {
+    type Args<'a> = ();
+    fn heap_bytes_required(&self, _: ()) -> u16 {
+        std::mem::size_of::<u16>() as u16
+    }
+}
+
+impl PageHeapObject for u32 {
+    type Args<'a> = ();
+    fn heap_bytes_required(&self, _: ()) -> u16 {
+        std::mem::size_of::<u32>() as u16
+    }
+}
+
+impl PageHeapObject for ColorIndex {
+    type Args<'a> = ();
+    fn heap_bytes_required(&self, _: ()) -> u16 {
+        (0u8).heap_bytes_required(())
+    }
+}
+
+impl PageHeapObject for FileType {
+    type Args<'a> = ();
+    fn heap_bytes_required(&self, _: ()) -> u16 {
+        (0u16).heap_bytes_required(())
+    }
+}
+
 /// A group of row indices, which are built backwards from the end of the page. Holds up to sixteen
 /// row offsets, along with a bit mask that indicates whether each row is actually present in the
 /// table.
@@ -734,6 +776,13 @@ impl PartialEq for RowGroup {
 #[brw(little)]
 pub struct Subtype(pub u16);
 
+impl PageHeapObject for Subtype {
+    type Args<'a> = ();
+    fn heap_bytes_required(&self, _: ()) -> u16 {
+        self.0.heap_bytes_required(())
+    }
+}
+
 impl Subtype {
     /// Returns the offset size (`OffsetSize`) used for this subtype.
     ///
@@ -755,11 +804,25 @@ impl Subtype {
 #[brw(little)]
 pub struct TrackId(pub u32);
 
+impl PageHeapObject for TrackId {
+    type Args<'a> = ();
+    fn heap_bytes_required(&self, _: ()) -> u16 {
+        self.0.heap_bytes_required(())
+    }
+}
+
 /// Identifies an artwork item.
 #[binrw]
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
 #[brw(little)]
 pub struct ArtworkId(pub u32);
+
+impl PageHeapObject for ArtworkId {
+    type Args<'a> = ();
+    fn heap_bytes_required(&self, _: ()) -> u16 {
+        self.0.heap_bytes_required(())
+    }
+}
 
 /// Identifies an album.
 #[binrw]
@@ -767,11 +830,25 @@ pub struct ArtworkId(pub u32);
 #[brw(little)]
 pub struct AlbumId(pub u32);
 
+impl PageHeapObject for AlbumId {
+    type Args<'a> = ();
+    fn heap_bytes_required(&self, _: ()) -> u16 {
+        self.0.heap_bytes_required(())
+    }
+}
+
 /// Identifies an artist.
 #[binrw]
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
 #[brw(little)]
 pub struct ArtistId(pub u32);
+
+impl PageHeapObject for ArtistId {
+    type Args<'a> = ();
+    fn heap_bytes_required(&self, _: ()) -> u16 {
+        self.0.heap_bytes_required(())
+    }
+}
 
 /// Identifies a genre.
 #[binrw]
@@ -779,11 +856,25 @@ pub struct ArtistId(pub u32);
 #[brw(little)]
 pub struct GenreId(pub u32);
 
+impl PageHeapObject for GenreId {
+    type Args<'a> = ();
+    fn heap_bytes_required(&self, _: ()) -> u16 {
+        self.0.heap_bytes_required(())
+    }
+}
+
 /// Identifies a key.
 #[binrw]
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
 #[brw(little)]
 pub struct KeyId(pub u32);
+
+impl PageHeapObject for KeyId {
+    type Args<'a> = ();
+    fn heap_bytes_required(&self, _: ()) -> u16 {
+        self.0.heap_bytes_required(())
+    }
+}
 
 /// Identifies a label.
 #[binrw]
@@ -791,17 +882,38 @@ pub struct KeyId(pub u32);
 #[brw(little)]
 pub struct LabelId(pub u32);
 
+impl PageHeapObject for LabelId {
+    type Args<'a> = ();
+    fn heap_bytes_required(&self, _: ()) -> u16 {
+        self.0.heap_bytes_required(())
+    }
+}
+
 /// Identifies a playlist tree node.
 #[binrw]
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
 #[brw(little)]
 pub struct PlaylistTreeNodeId(pub u32);
 
+impl PageHeapObject for PlaylistTreeNodeId {
+    type Args<'a> = ();
+    fn heap_bytes_required(&self, _: ()) -> u16 {
+        self.0.heap_bytes_required(())
+    }
+}
+
 /// Identifies a history playlist.
 #[binrw]
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
 #[brw(little)]
 pub struct HistoryPlaylistId(pub u32);
+
+impl PageHeapObject for HistoryPlaylistId {
+    type Args<'a> = ();
+    fn heap_bytes_required(&self, _: ()) -> u16 {
+        self.0.heap_bytes_required(())
+    }
+}
 
 #[derive(Debug, PartialEq, Clone, Eq)]
 /// Represents a trailing name field at the end of a row, used for album and artist names.
@@ -863,6 +975,24 @@ impl RowVariant for Album {
     }
 }
 
+impl PageHeapObject for Album {
+    type Args<'a> = ();
+    fn heap_bytes_required(&self, _: ()) -> u16 {
+        [
+            self.subtype.heap_bytes_required(()),
+            self.index_shift.heap_bytes_required(()),
+            self.unknown2.heap_bytes_required(()),
+            self.artist_id.heap_bytes_required(()),
+            self.id.heap_bytes_required(()),
+            self.unknown3.heap_bytes_required(()),
+            self.offsets
+                .heap_bytes_required(self.subtype.get_offset_size()),
+        ]
+        .iter()
+        .sum()
+    }
+}
+
 /// Contains the artist name and ID.
 #[binrw]
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -897,6 +1027,21 @@ impl RowVariant for Artist {
     }
 }
 
+impl PageHeapObject for Artist {
+    type Args<'a> = ();
+    fn heap_bytes_required(&self, _: ()) -> u16 {
+        [
+            self.subtype.heap_bytes_required(()),
+            self.index_shift.heap_bytes_required(()),
+            self.id.heap_bytes_required(()),
+            self.offsets
+                .heap_bytes_required(self.subtype.get_offset_size()),
+        ]
+        .iter()
+        .sum()
+    }
+}
+
 /// Contains the artwork path and ID.
 #[binrw]
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -922,6 +1067,18 @@ impl RowVariant for Artwork {
             Row::Plain(PlainRow::Artwork(row)) => Some(row),
             _ => None,
         }
+    }
+}
+
+impl PageHeapObject for Artwork {
+    type Args<'a> = ();
+    fn heap_bytes_required(&self, _: ()) -> u16 {
+        [
+            self.id.heap_bytes_required(()),
+            self.path.heap_bytes_required(()),
+        ]
+        .iter()
+        .sum()
     }
 }
 
@@ -959,6 +1116,21 @@ impl RowVariant for Color {
     }
 }
 
+impl PageHeapObject for Color {
+    type Args<'a> = ();
+    fn heap_bytes_required(&self, _: ()) -> u16 {
+        [
+            self.unknown1.heap_bytes_required(()),
+            self.unknown2.heap_bytes_required(()),
+            self.color.heap_bytes_required(()),
+            self.unknown3.heap_bytes_required(()),
+            self.name.heap_bytes_required(()),
+        ]
+        .iter()
+        .sum()
+    }
+}
+
 /// Represents a musical genre.
 #[binrw]
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -987,6 +1159,18 @@ impl RowVariant for Genre {
     }
 }
 
+impl PageHeapObject for Genre {
+    type Args<'a> = ();
+    fn heap_bytes_required(&self, _: ()) -> u16 {
+        [
+            self.id.heap_bytes_required(()),
+            self.name.heap_bytes_required(()),
+        ]
+        .iter()
+        .sum()
+    }
+}
+
 /// Represents a history playlist.
 #[binrw]
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -1012,6 +1196,18 @@ impl RowVariant for HistoryPlaylist {
             Row::Plain(PlainRow::HistoryPlaylist(row)) => Some(row),
             _ => None,
         }
+    }
+}
+
+impl PageHeapObject for HistoryPlaylist {
+    type Args<'a> = ();
+    fn heap_bytes_required(&self, _: ()) -> u16 {
+        [
+            self.id.heap_bytes_required(()),
+            self.name.heap_bytes_required(()),
+        ]
+        .iter()
+        .sum()
     }
 }
 
@@ -1045,6 +1241,19 @@ impl RowVariant for HistoryEntry {
     }
 }
 
+impl PageHeapObject for HistoryEntry {
+    type Args<'a> = ();
+    fn heap_bytes_required(&self, _: ()) -> u16 {
+        [
+            self.track_id.heap_bytes_required(()),
+            self.playlist_id.heap_bytes_required(()),
+            self.entry_index.heap_bytes_required(()),
+        ]
+        .iter()
+        .sum()
+    }
+}
+
 /// Represents a musical key.
 #[binrw]
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -1075,6 +1284,19 @@ impl RowVariant for Key {
     }
 }
 
+impl PageHeapObject for Key {
+    type Args<'a> = ();
+    fn heap_bytes_required(&self, _: ()) -> u16 {
+        [
+            self.id.heap_bytes_required(()),
+            self.id2.heap_bytes_required(()),
+            self.name.heap_bytes_required(()),
+        ]
+        .iter()
+        .sum()
+    }
+}
+
 /// Represents a record label.
 #[binrw]
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -1100,6 +1322,18 @@ impl RowVariant for Label {
             Row::Plain(PlainRow::Label(row)) => Some(row),
             _ => None,
         }
+    }
+}
+
+impl PageHeapObject for Label {
+    type Args<'a> = ();
+    fn heap_bytes_required(&self, _: ()) -> u16 {
+        [
+            self.id.heap_bytes_required(()),
+            self.name.heap_bytes_required(()),
+        ]
+        .iter()
+        .sum()
     }
 }
 
@@ -1147,6 +1381,22 @@ impl PlaylistTreeNode {
     }
 }
 
+impl PageHeapObject for PlaylistTreeNode {
+    type Args<'a> = ();
+    fn heap_bytes_required(&self, _: ()) -> u16 {
+        [
+            self.parent_id.heap_bytes_required(()),
+            self.unknown.heap_bytes_required(()),
+            self.sort_order.heap_bytes_required(()),
+            self.id.heap_bytes_required(()),
+            self.node_is_folder.heap_bytes_required(()),
+            self.name.heap_bytes_required(()),
+        ]
+        .iter()
+        .sum()
+    }
+}
+
 /// Represents a track entry in a playlist.
 #[binrw]
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -1174,6 +1424,19 @@ impl RowVariant for PlaylistEntry {
             Row::Plain(PlainRow::PlaylistEntry(row)) => Some(row),
             _ => None,
         }
+    }
+}
+
+impl PageHeapObject for PlaylistEntry {
+    type Args<'a> = ();
+    fn heap_bytes_required(&self, _: ()) -> u16 {
+        [
+            self.entry_index.heap_bytes_required(()),
+            self.track_id.heap_bytes_required(()),
+            self.playlist_id.heap_bytes_required(()),
+        ]
+        .iter()
+        .sum()
     }
 }
 
@@ -1214,6 +1477,19 @@ impl RowVariant for ColumnEntry {
             Row::Plain(PlainRow::ColumnEntry(row)) => Some(row),
             _ => None,
         }
+    }
+}
+
+impl PageHeapObject for ColumnEntry {
+    type Args<'a> = ();
+    fn heap_bytes_required(&self, _: ()) -> u16 {
+        [
+            self.id.heap_bytes_required(()),
+            self.unknown0.heap_bytes_required(()),
+            self.column_name.heap_bytes_required(()),
+        ]
+        .iter()
+        .sum()
     }
 }
 
@@ -1415,6 +1691,48 @@ impl RowVariant for Track {
     }
 }
 
+impl PageHeapObject for Track {
+    type Args<'a> = ();
+    fn heap_bytes_required(&self, _: ()) -> u16 {
+        [
+            self.subtype.heap_bytes_required(()),
+            self.index_shift.heap_bytes_required(()),
+            self.bitmask.heap_bytes_required(()),
+            self.sample_rate.heap_bytes_required(()),
+            self.composer_id.heap_bytes_required(()),
+            self.file_size.heap_bytes_required(()),
+            self.unknown2.heap_bytes_required(()),
+            self.unknown3.heap_bytes_required(()),
+            self.unknown4.heap_bytes_required(()),
+            self.artwork_id.heap_bytes_required(()),
+            self.key_id.heap_bytes_required(()),
+            self.orig_artist_id.heap_bytes_required(()),
+            self.label_id.heap_bytes_required(()),
+            self.remixer_id.heap_bytes_required(()),
+            self.bitrate.heap_bytes_required(()),
+            self.track_number.heap_bytes_required(()),
+            self.tempo.heap_bytes_required(()),
+            self.genre_id.heap_bytes_required(()),
+            self.album_id.heap_bytes_required(()),
+            self.artist_id.heap_bytes_required(()),
+            self.id.heap_bytes_required(()),
+            self.disc_number.heap_bytes_required(()),
+            self.play_count.heap_bytes_required(()),
+            self.year.heap_bytes_required(()),
+            self.sample_depth.heap_bytes_required(()),
+            self.duration.heap_bytes_required(()),
+            self.unknown5.heap_bytes_required(()),
+            self.color.heap_bytes_required(()),
+            self.rating.heap_bytes_required(()),
+            self.file_type.heap_bytes_required(()),
+            self.offsets
+                .heap_bytes_required(self.subtype.get_offset_size()),
+        ]
+        .iter()
+        .sum()
+    }
+}
+
 /// Visibility state for a Menu on the CDJ.
 #[binrw]
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -1428,6 +1746,13 @@ pub enum MenuVisibility {
     Hidden,
     /// Unknown visibility flag.
     Unknown(u8),
+}
+
+impl PageHeapObject for MenuVisibility {
+    type Args<'a> = ();
+    fn heap_bytes_required(&self, _: ()) -> u16 {
+        (0u8).heap_bytes_required(())
+    }
 }
 
 /// This table defines the active menus on the CDJ.
@@ -1461,6 +1786,21 @@ pub struct Menu {
     /// Visual position in the menu list.
     /// 0 is valid and places the item at the very top (if visible).
     pub sort_order: u16,
+}
+
+impl PageHeapObject for Menu {
+    type Args<'a> = ();
+    fn heap_bytes_required(&self, _: ()) -> u16 {
+        [
+            self.category_id.heap_bytes_required(()),
+            self.content_pointer.heap_bytes_required(()),
+            self.unknown.heap_bytes_required(()),
+            self.visibility.heap_bytes_required(()),
+            self.sort_order.heap_bytes_required(()),
+        ]
+        .iter()
+        .sum()
+    }
 }
 
 /// A table row contains the actual data.
@@ -1524,6 +1864,30 @@ pub enum PlainRow {
     Track(Track),
 }
 
+impl PageHeapObject for PlainRow {
+    type Args<'a> = ();
+    fn heap_bytes_required(&self, _: ()) -> u16 {
+        match self {
+            PlainRow::Album(album) => album.heap_bytes_required(()),
+            PlainRow::Artist(artist) => artist.heap_bytes_required(()),
+            PlainRow::Artwork(artwork) => artwork.heap_bytes_required(()),
+            PlainRow::Color(color) => color.heap_bytes_required(()),
+            PlainRow::Genre(genre) => genre.heap_bytes_required(()),
+            PlainRow::HistoryPlaylist(history_playlist) => history_playlist.heap_bytes_required(()),
+            PlainRow::HistoryEntry(history_entry) => history_entry.heap_bytes_required(()),
+            PlainRow::Key(key) => key.heap_bytes_required(()),
+            PlainRow::Label(label) => label.heap_bytes_required(()),
+            PlainRow::PlaylistTreeNode(playlist_tree_node) => {
+                playlist_tree_node.heap_bytes_required(())
+            }
+            PlainRow::PlaylistEntry(playlist_entry) => playlist_entry.heap_bytes_required(()),
+            PlainRow::ColumnEntry(column_entry) => column_entry.heap_bytes_required(()),
+            PlainRow::Menu(menu) => menu.heap_bytes_required(()),
+            PlainRow::Track(track) => track.heap_bytes_required(()),
+        }
+    }
+}
+
 /// A table row contains the actual data.
 #[binrw]
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -1570,5 +1934,15 @@ impl Row {
     #[must_use]
     pub fn as_variant_mut<T: RowVariant>(&mut self) -> Option<&mut T> {
         T::from_row_mut(self)
+    }
+}
+
+impl PageHeapObject for Row {
+    type Args<'a> = ();
+    fn heap_bytes_required(&self, _: ()) -> u16 {
+        match self {
+            Row::Plain(plain_row) => plain_row.heap_bytes_required(()),
+            Row::Ext(ext_row) => ext_row.heap_bytes_required(()),
+        }
     }
 }
