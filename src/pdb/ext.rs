@@ -164,6 +164,16 @@ pub enum ExtRow {
     TrackTag(TrackTag),
 }
 
+impl ExtRow {
+    /// Returns the number of extra padding bytes appended after a row of this type.
+    ///
+    /// Ext rows currently have no per-type padding.
+    #[must_use]
+    pub fn type_padding(&self) -> u16 {
+        0
+    }
+}
+
 impl SerializedSize for ExtRow {
     fn serialized_size(&self) -> u16 {
         match self {

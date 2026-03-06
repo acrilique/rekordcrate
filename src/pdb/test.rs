@@ -8,7 +8,7 @@
 use super::ext::*;
 use super::*;
 use crate::util::testing::{test_roundtrip, test_roundtrip_with_args};
-use crate::util::{ColorIndex, FileType};
+use crate::util::{align_by, ColorIndex, FileType};
 use binrw::BinWrite;
 use std::collections::BTreeMap;
 use std::num::NonZero;
@@ -12094,4 +12094,89 @@ fn serialized_size_row_delegates() {
     };
     let row = Row::Plain(PlainRow::Label(inner.clone()));
     assert_eq!(row.serialized_size(), inner.serialized_size());
+}
+
+#[test]
+fn aligned_size_album() {
+    let bin: &[u8] = &[
+        0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x16, 0x15, 0x47, 0x4f, 0x4f, 0x44, 0x20, 0x4c, 0x55,
+        0x43, 0x4b,
+    ];
+    let mut cursor = binrw::io::Cursor::new(bin);
+    let inner = Album::read(&mut cursor).unwrap();
+    let row = Row::Plain(PlainRow::Album(inner));
+    let expected = align_by(
+        4,
+        (bin.len() as u64) + u64::from(PlainRow::ALBUM_ROW_PADDING),
+    ) as u32;
+    assert_eq!(row.aligned_size(), expected);
+}
+
+#[test]
+fn aligned_size_artist() {
+    let bin: &[u8] = &[
+        96, 0, 0, 0, 1, 0, 0, 0, 3, 10, 25, 76, 111, 111, 112, 109, 97, 115, 116, 101, 114, 115,
+    ];
+    let mut cursor = binrw::io::Cursor::new(bin);
+    let inner = Artist::read(&mut cursor).unwrap();
+    let row = Row::Plain(PlainRow::Artist(inner));
+    let expected = align_by(
+        4,
+        (bin.len() as u64) + u64::from(PlainRow::ARTIST_ROW_PADDING),
+    ) as u32;
+    assert_eq!(row.aligned_size(), expected);
+}
+
+#[test]
+fn aligned_size_track() {
+    let bin: &[u8] = &[
+        36, 0, 0, 0, 0, 7, 12, 0, 68, 172, 0, 0, 0, 0, 0, 0, 168, 71, 105, 0, 218, 177, 193, 12,
+        128, 250, 231, 5, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 64, 1, 0, 0,
+        0, 0, 0, 0, 0, 50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        16, 0, 172, 0, 41, 0, 0, 0, 1, 0, 3, 0, 136, 0, 137, 0, 138, 0, 140, 0, 142, 0, 143, 0,
+        144, 0, 145, 0, 148, 0, 149, 0, 150, 0, 161, 0, 162, 0, 163, 0, 164, 0, 208, 0, 219, 0,
+        249, 0, 6, 1, 7, 1, 24, 1, 3, 3, 5, 51, 5, 51, 3, 3, 3, 7, 79, 78, 3, 3, 23, 50, 48, 49,
+        56, 45, 48, 53, 45, 50, 53, 3, 3, 3, 89, 47, 80, 73, 79, 78, 69, 69, 82, 47, 85, 83, 66,
+        65, 78, 76, 90, 47, 80, 48, 49, 54, 47, 48, 48, 48, 48, 56, 55, 53, 69, 47, 65, 78, 76, 90,
+        48, 48, 48, 48, 46, 68, 65, 84, 23, 50, 48, 50, 50, 45, 48, 50, 45, 48, 50, 61, 84, 114,
+        97, 99, 107, 115, 32, 98, 121, 32, 119, 119, 119, 46, 108, 111, 111, 112, 109, 97, 115,
+        116, 101, 114, 115, 46, 99, 111, 109, 27, 68, 101, 109, 111, 32, 84, 114, 97, 99, 107, 32,
+        49, 3, 35, 68, 101, 109, 111, 32, 84, 114, 97, 99, 107, 32, 49, 46, 109, 112, 51, 105, 47,
+        67, 111, 110, 116, 101, 110, 116, 115, 47, 76, 111, 111, 112, 109, 97, 115, 116, 101, 114,
+        115, 47, 85, 110, 107, 110, 111, 119, 110, 65, 108, 98, 117, 109, 47, 68, 101, 109, 111,
+        32, 84, 114, 97, 99, 107, 32, 49, 46, 109, 112, 51,
+    ];
+    let mut cursor = binrw::io::Cursor::new(bin);
+    let inner = Track::read(&mut cursor).unwrap();
+    let row = Row::Plain(PlainRow::Track(inner));
+    let expected = align_by(
+        4,
+        (bin.len() as u64) + u64::from(PlainRow::TRACK_ROW_PADDING),
+    ) as u32;
+    assert_eq!(row.aligned_size(), expected);
+}
+
+#[test]
+fn aligned_size_no_padding() {
+    let row = Row::Plain(PlainRow::Color(Color {
+        unknown1: 0,
+        unknown2: 0,
+        color: ColorIndex::Pink,
+        unknown3: 0,
+        name: "Pink".parse().unwrap(),
+    }));
+    let expected = align_by(4, u64::from(row.serialized_size())) as u32;
+    assert_eq!(row.aligned_size(), expected);
+}
+
+#[test]
+fn aligned_size_ext_row() {
+    let row = Row::Ext(ExtRow::TrackTag(TrackTag {
+        track_id: TrackId(1),
+        tag_id: TagId(100),
+        unknown_const: 3,
+    }));
+    let expected = align_by(4, u64::from(row.serialized_size())) as u32;
+    assert_eq!(row.aligned_size(), expected);
 }

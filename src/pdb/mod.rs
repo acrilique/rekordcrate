@@ -36,7 +36,7 @@ use std::fmt;
 use crate::pdb::ext::{ExtPageType, ExtRow};
 use crate::pdb::offset_array::{OffsetArray, OffsetSize};
 use crate::pdb::string::DeviceSQLString;
-use crate::util::{parse_at_offsets, write_at_offsets, ColorIndex, FileType, TableIndex};
+use crate::util::{align_by, parse_at_offsets, write_at_offsets, ColorIndex, FileType, TableIndex};
 use binrw::{binrw, BinRead, BinResult, BinWrite, Endian};
 use std::io::{Read, Seek, SeekFrom, Write};
 use thiserror::Error;
@@ -1615,13 +1615,15 @@ impl SerializedSize for Menu {
 #[allow(clippy::large_enum_variant)]
 pub enum PlainRow {
     /// Contains the album name, along with an ID of the corresponding artist.
-    // FIXME: Fresh album rows typically have about 6 bytes of padding,
-    // presumably to allow edits on DJ gear.
+    ///
+    /// Fresh album rows typically have about 6 bytes of padding, presumably to allow edits on DJ
+    /// gear. This is accounted for by [`PlainRow::type_padding`].
     #[br(pre_assert(page_type == PlainPageType::Albums))]
     Album(Album),
     /// Contains the artist name and ID.
-    // FIXME: Fresh artist rows typically have about 6 bytes of padding,
-    // presumably to allow edits on DJ gear.
+    ///
+    /// Fresh artist rows typically have about 6 bytes of padding, presumably to allow edits on DJ
+    /// gear. This is accounted for by [`PlainRow::type_padding`].
     #[br(pre_assert(page_type == PlainPageType::Artists))]
     Artist(Artist),
     /// Contains the artwork path and ID.
@@ -1658,10 +1660,34 @@ pub enum PlainRow {
     #[br(pre_assert(page_type == PlainPageType::Menu))]
     Menu(Menu),
     /// Contains a track entry.
-    // FIXME: Fresh track rows typically have about 48 bytes of padding,
-    // presumably to allow edits on DJ gear.
+    ///
+    /// Fresh track rows typically have about 48 bytes of padding, presumably to allow edits on DJ
+    /// gear. This is accounted for by [`PlainRow::type_padding`].
     #[br(pre_assert(page_type == PlainPageType::Tracks))]
     Track(Track),
+}
+
+impl PlainRow {
+    /// Extra padding (in bytes) appended after a row of this type.
+    ///
+    /// Certain row types carry additional padding beyond 4-byte alignment, presumably to allow
+    /// in-place edits on DJ gear.
+    const ALBUM_ROW_PADDING: u16 = 6;
+    /// See [`Self::ALBUM_ROW_PADDING`].
+    const ARTIST_ROW_PADDING: u16 = 6;
+    /// See [`Self::ALBUM_ROW_PADDING`].
+    const TRACK_ROW_PADDING: u16 = 48;
+
+    /// Returns the number of extra padding bytes appended after a row of this type.
+    #[must_use]
+    pub fn type_padding(&self) -> u16 {
+        match self {
+            Self::Album(_) => Self::ALBUM_ROW_PADDING,
+            Self::Artist(_) => Self::ARTIST_ROW_PADDING,
+            Self::Track(_) => Self::TRACK_ROW_PADDING,
+            _ => 0,
+        }
+    }
 }
 
 impl SerializedSize for PlainRow {
@@ -1695,9 +1721,8 @@ impl SerializedSize for PlainRow {
 // require a heap allocation per row, which is arguably worse. Hence, the warning is disabled for
 // this enum.
 //
-// FIXME: Rows must always be aligned to 4 bytes, and certain row types typically have padding
-// after each row too (see PlainRow). This is irrelevant while we write rows to precise offsets
-// but needs to be considered when we generate row offsets from scratch.
+// Rows are always aligned to 4 bytes, and certain row types have additional padding (see
+// [`PlainRow::type_padding`]). Use [`Row::aligned_size`] to determine the total slot size.
 #[allow(clippy::large_enum_variant)]
 pub enum Row {
     // TODO(Swiftb0y: come up with something prettier than the match hell below)
@@ -1731,6 +1756,20 @@ impl Row {
     #[must_use]
     pub fn as_variant_mut<T: RowVariant>(&mut self) -> Option<&mut T> {
         T::from_row_mut(self)
+    }
+
+    /// Returns the total slot size this row occupies in the page heap.
+    ///
+    /// This is the [`SerializedSize::serialized_size`] plus any per-type padding
+    /// (see [`PlainRow::type_padding`]), rounded up to 4-byte alignment.
+    #[must_use]
+    pub fn aligned_size(&self) -> u32 {
+        let (serialized, padding) = match self {
+            Self::Plain(row) => (row.serialized_size(), row.type_padding()),
+            Self::Ext(row) => (row.serialized_size(), row.type_padding()),
+        };
+        let base = u32::from(serialized) + u32::from(padding);
+        align_by(4, u64::from(base)) as u32
     }
 }
 
