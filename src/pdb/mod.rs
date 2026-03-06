@@ -28,7 +28,10 @@ use bitfields::PackedRowCounts;
 use offset_array::{OffsetArrayContainer, OffsetArrayItems};
 
 #[cfg(test)]
-mod test;
+mod test_roundtrip;
+
+#[cfg(test)]
+mod test_mutation;
 
 use std::collections::btree_map;
 use std::collections::BTreeMap;
@@ -582,10 +585,15 @@ pub struct Page {
 }
 
 impl Page {
-    fn reserve_row(&mut self, bytes: u16) -> Option<btree_map::VacantEntry<'_, u16, Row>> {
+    /// Allocate a new row and return a vacant entry in the row map for it,
+    /// or `None` if there is not enough free space in the page.
+    pub fn allocate_row(&mut self, bytes: u16) -> Option<btree_map::VacantEntry<'_, u16, Row>> {
         match self.content {
             PageContent::Index(_) => None,
             PageContent::Data(ref mut dpc) => {
+                // Always align rows to 4 bytes.
+                let bytes = bytes.next_multiple_of(4);
+
                 // Assume the upper bound of required space.
                 let required_bytes = bytes + RowGroup::HEADER_SIZE + RowGroup::OFFSET_SIZE;
                 if self.header.free_size < required_bytes {
