@@ -47,4 +47,22 @@ impl PackedRowCounts {
     pub(crate) fn num_row_groups(&self) -> u16 {
         self.num_rows().div_ceil(RowGroup::MAX_ROW_COUNT as u16)
     }
+
+    /// Get the index of the last row group in the page and
+    /// the index of the last row in that row group.
+    pub(crate) fn last_row_index(&self) -> Option<(u16, u16)> {
+        let rgi = self.num_row_groups().checked_sub(1)?;
+        let rsi = self
+            .num_rows()
+            .checked_sub(1)
+            .map(|n| n % RowGroup::MAX_ROW_COUNT as u16)?;
+        Some((rgi, rsi))
+    }
+
+    /// Increment both number of rows and number of valid rows by one,
+    /// e.g. when we are adding a new row to the page.
+    pub(crate) fn increment_rows(&mut self) {
+        self.set_num_rows(self.num_rows() + 1);
+        self.set_num_rows_valid(self.num_rows_valid() + 1);
+    }
 }

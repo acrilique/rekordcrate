@@ -30,6 +30,7 @@ use offset_array::{OffsetArrayContainer, OffsetArrayItems};
 #[cfg(test)]
 mod test;
 
+use std::collections::btree_map;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -580,6 +581,49 @@ pub struct Page {
     pub content: PageContent,
 }
 
+impl Page {
+    fn reserve_row(&mut self, bytes: u16) -> Option<btree_map::VacantEntry<'_, u16, Row>> {
+        match self.content {
+            PageContent::Index(_) => None,
+            PageContent::Data(ref mut dpc) => {
+                // Assume the upper bound of required space.
+                let required_bytes = bytes + RowGroup::HEADER_SIZE + RowGroup::OFFSET_SIZE;
+                if self.header.free_size < required_bytes {
+                    return None;
+                }
+
+                let offset = self.header.used_size;
+                match dpc.rows.entry(offset) {
+                    btree_map::Entry::Occupied(occupied_entry) => panic!(
+                        "Offset {} is already occupied by row {:?}",
+                        offset,
+                        occupied_entry.get()
+                    ),
+                    btree_map::Entry::Vacant(vacant_entry) => {
+                        self.header.used_size += bytes;
+                        self.header.free_size -= bytes;
+
+                        self.header.packed_row_counts.increment_rows();
+                        let (row_group_index, row_subindex) =
+                            self.header.packed_row_counts.last_row_index().unwrap();
+
+                        if dpc.row_groups.get(row_group_index as usize).is_none() {
+                            dpc.row_groups.push(RowGroup::empty());
+                            self.header.free_size -= RowGroup::HEADER_SIZE;
+                        }
+
+                        let row_group = dpc.row_groups.get_mut(row_group_index as usize).unwrap();
+                        row_group.insert_offset(row_subindex, offset);
+                        self.header.free_size -= RowGroup::OFFSET_SIZE;
+
+                        Some(vacant_entry)
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The header of the data-containing part of a page.
 #[binrw]
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -730,9 +774,18 @@ pub struct RowGroup {
 }
 
 impl RowGroup {
-    /// Maximum number of rows in a row group.
-    pub const MAX_ROW_COUNT: usize = 16;
-    const BINARY_SIZE: u32 = (Self::MAX_ROW_COUNT as u32) * 2 + 4; // size the serialized structure
+    const MAX_ROW_COUNT: usize = 16;
+    const HEADER_SIZE: u16 = 4; // row_presence_flags and unknown fields.
+    const OFFSET_SIZE: u16 = 2;
+    const BINARY_SIZE: u16 = (Self::MAX_ROW_COUNT as u16) * Self::OFFSET_SIZE + Self::HEADER_SIZE;
+
+    fn empty() -> Self {
+        Self {
+            row_offsets: [0; Self::MAX_ROW_COUNT],
+            row_presence_flags: 0,
+            unknown: 0,
+        }
+    }
 
     fn present_rows_offsets(&self) -> impl Iterator<Item = u16> + '_ {
         self.row_offsets
@@ -760,6 +813,18 @@ impl RowGroup {
             offset.write_options(writer, endian, ())?;
         }
         Ok(())
+    }
+
+    /// Inserts a row offset into the group at the given subindex, and marks it as present in the flags.
+    fn insert_offset(&mut self, subindex: u16, offset: u16) {
+        self.row_offsets[(Self::MAX_ROW_COUNT as u16 - 1 - subindex) as usize] = offset;
+        self.row_presence_flags |= 1 << subindex;
+    }
+}
+
+impl Default for RowGroup {
+    fn default() -> Self {
+        Self::empty()
     }
 }
 
