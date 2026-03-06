@@ -19,7 +19,9 @@
 //! - <https://github.com/henrybetts/Rekordbox-Decoding>
 //! - <https://github.com/flesniak/python-prodj-link/tree/master/prodj/pdblib>
 
-use crate::pdb::{DeviceSQLString, OffsetArray, OffsetArrayContainer, Subtype, TrackId};
+use crate::pdb::{
+    DeviceSQLString, OffsetArray, OffsetArrayContainer, SerializedSize, Subtype, TrackId,
+};
 use binrw::binrw;
 use std::num::NonZero;
 
@@ -55,6 +57,12 @@ pub struct TagOrCategoryStrings {
     #[bw(write_with = offsets.write_offset(1))]
     /// String with unknown purpose, often empty.
     pub unknown: DeviceSQLString,
+}
+
+impl SerializedSize for TagOrCategoryStrings {
+    fn serialized_size(&self) -> u16 {
+        self.name.serialized_size() + self.unknown.serialized_size()
+    }
 }
 
 /// A tag or category that can be assigned to tracks for the purpose of categorization.
@@ -93,6 +101,15 @@ pub struct TagOrCategory {
     pub offsets: OffsetArrayContainer<TagOrCategoryStrings, 2>,
 }
 
+impl SerializedSize for TagOrCategory {
+    fn serialized_size(&self) -> u16 {
+        // subtype(2) + index_shift(2) + unknown1(4) + unknown2(4) + parent_id(4)
+        // + position(4) + id(4) + raw_is_category(4) = 28 (0x1C)
+        // + 11 bytes pad_after
+        28 + self.offsets.serialized_size() + 11
+    }
+}
+
 // https://djl-analysis.deepsymmetry.org/rekordbox-export-analysis/exports.html#tag-track-rows
 /// M*N junction table between tags and tracks.
 #[binrw]
@@ -106,6 +123,13 @@ pub struct TrackTag {
     pub tag_id: TagId,
     /// Unknown purpose, seems to be always 3.
     pub unknown_const: u32, // always 3?
+}
+
+impl SerializedSize for TrackTag {
+    fn serialized_size(&self) -> u16 {
+        // magic(4) + track_id(4) + tag_id(4) + unknown_const(4) = 16
+        16
+    }
 }
 
 /// The type of ext pages found inside a `Table`.
@@ -138,4 +162,13 @@ pub enum ExtRow {
     /// Contains the artist name and ID.
     #[br(pre_assert(page_type == ExtPageType::TrackTag))]
     TrackTag(TrackTag),
+}
+
+impl SerializedSize for ExtRow {
+    fn serialized_size(&self) -> u16 {
+        match self {
+            Self::Tag(row) => row.serialized_size(),
+            Self::TrackTag(row) => row.serialized_size(),
+        }
+    }
 }

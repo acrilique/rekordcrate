@@ -43,6 +43,7 @@
 //! };
 //! ```
 
+use super::SerializedSize;
 use binrw::{binrw, io::SeekFrom, BinRead, BinResult, BinWrite};
 
 /// Specifies whether the offsets are stored as u8 or u16.
@@ -285,6 +286,23 @@ impl<const N: usize> From<[u8; N]> for OffsetArray<N> {
 impl<const N: usize> From<[u16; N]> for OffsetArray<N> {
     fn from(arr: [u16; N]) -> Self {
         Self::U16(arr)
+    }
+}
+
+impl<const N: usize> SerializedSize for OffsetArray<N> {
+    fn serialized_size(&self) -> u16 {
+        match self {
+            // 1 byte magic (0x03) + N bytes of u8 offsets
+            Self::U8(_) => 1 + N as u16,
+            // 2 byte magic (0x0003) + N * 2 bytes of u16 offsets
+            Self::U16(_) => 2 + 2 * N as u16,
+        }
+    }
+}
+
+impl<T: SerializedSize, const N: usize> SerializedSize for OffsetArrayContainer<T, N> {
+    fn serialized_size(&self) -> u16 {
+        self.offsets.serialized_size() + self.inner.serialized_size()
     }
 }
 

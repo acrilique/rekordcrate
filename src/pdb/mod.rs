@@ -134,6 +134,12 @@ pub enum PlainPageType {
     // History,
 }
 
+/// Returns the total number of bytes this type occupies when serialized to wire format.
+pub trait SerializedSize {
+    /// Returns the total number of bytes this type occupies when serialized.
+    fn serialized_size(&self) -> u16;
+}
+
 /// A row variant that can be extracted from a generic `Row`.
 pub trait RowVariant {
     /// The page type that contains rows of this variant.
@@ -816,6 +822,12 @@ pub struct TrailingName {
     pub name: DeviceSQLString,
 }
 
+impl SerializedSize for TrailingName {
+    fn serialized_size(&self) -> u16 {
+        self.name.serialized_size()
+    }
+}
+
 /// Contains the album name, along with an ID of the corresponding artist.
 #[binrw]
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -856,6 +868,13 @@ impl RowVariant for Album {
     }
 }
 
+impl SerializedSize for Album {
+    fn serialized_size(&self) -> u16 {
+        // subtype(2) + index_shift(2) + unknown2(4) + artist_id(4) + id(4) + unknown3(4) = 20
+        20 + self.offsets.serialized_size()
+    }
+}
+
 /// Contains the artist name and ID.
 #[binrw]
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -890,6 +909,13 @@ impl RowVariant for Artist {
     }
 }
 
+impl SerializedSize for Artist {
+    fn serialized_size(&self) -> u16 {
+        // subtype(2) + index_shift(2) + id(4) = 8
+        8 + self.offsets.serialized_size()
+    }
+}
+
 /// Contains the artwork path and ID.
 #[binrw]
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -915,6 +941,13 @@ impl RowVariant for Artwork {
             Row::Plain(PlainRow::Artwork(row)) => Some(row),
             _ => None,
         }
+    }
+}
+
+impl SerializedSize for Artwork {
+    fn serialized_size(&self) -> u16 {
+        // id(4) = 4
+        4 + self.path.serialized_size()
     }
 }
 
@@ -952,6 +985,13 @@ impl RowVariant for Color {
     }
 }
 
+impl SerializedSize for Color {
+    fn serialized_size(&self) -> u16 {
+        // unknown1(4) + unknown2(1) + color(1) + unknown3(2) = 8
+        8 + self.name.serialized_size()
+    }
+}
+
 /// Represents a musical genre.
 #[binrw]
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -980,6 +1020,13 @@ impl RowVariant for Genre {
     }
 }
 
+impl SerializedSize for Genre {
+    fn serialized_size(&self) -> u16 {
+        // id(4) = 4
+        4 + self.name.serialized_size()
+    }
+}
+
 /// Represents a history playlist.
 #[binrw]
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -1005,6 +1052,13 @@ impl RowVariant for HistoryPlaylist {
             Row::Plain(PlainRow::HistoryPlaylist(row)) => Some(row),
             _ => None,
         }
+    }
+}
+
+impl SerializedSize for HistoryPlaylist {
+    fn serialized_size(&self) -> u16 {
+        // id(4) = 4
+        4 + self.name.serialized_size()
     }
 }
 
@@ -1038,6 +1092,13 @@ impl RowVariant for HistoryEntry {
     }
 }
 
+impl SerializedSize for HistoryEntry {
+    fn serialized_size(&self) -> u16 {
+        // track_id(4) + playlist_id(4) + entry_index(4) = 12
+        12
+    }
+}
+
 /// Represents a musical key.
 #[binrw]
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -1068,6 +1129,13 @@ impl RowVariant for Key {
     }
 }
 
+impl SerializedSize for Key {
+    fn serialized_size(&self) -> u16 {
+        // id(4) + id2(4) = 8
+        8 + self.name.serialized_size()
+    }
+}
+
 /// Represents a record label.
 #[binrw]
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -1093,6 +1161,13 @@ impl RowVariant for Label {
             Row::Plain(PlainRow::Label(row)) => Some(row),
             _ => None,
         }
+    }
+}
+
+impl SerializedSize for Label {
+    fn serialized_size(&self) -> u16 {
+        // id(4) = 4
+        4 + self.name.serialized_size()
     }
 }
 
@@ -1129,6 +1204,13 @@ impl RowVariant for PlaylistTreeNode {
             Row::Plain(PlainRow::PlaylistTreeNode(row)) => Some(row),
             _ => None,
         }
+    }
+}
+
+impl SerializedSize for PlaylistTreeNode {
+    fn serialized_size(&self) -> u16 {
+        // parent_id(4) + unknown(4) + sort_order(4) + id(4) + node_is_folder(4) = 20
+        20 + self.name.serialized_size()
     }
 }
 
@@ -1170,6 +1252,13 @@ impl RowVariant for PlaylistEntry {
     }
 }
 
+impl SerializedSize for PlaylistEntry {
+    fn serialized_size(&self) -> u16 {
+        // entry_index(4) + track_id(4) + playlist_id(4) = 12
+        12
+    }
+}
+
 /// Contains the kinds of Metadata Categories tracks can be browsed by
 /// on CDJs.
 #[binrw]
@@ -1207,6 +1296,13 @@ impl RowVariant for ColumnEntry {
             Row::Plain(PlainRow::ColumnEntry(row)) => Some(row),
             _ => None,
         }
+    }
+}
+
+impl SerializedSize for ColumnEntry {
+    fn serialized_size(&self) -> u16 {
+        // id(2) + unknown0(2) = 4
+        4 + self.column_name.serialized_size()
     }
 }
 
@@ -1325,6 +1421,35 @@ pub struct TrackStrings {
     pub file_path: DeviceSQLString,
 }
 
+impl SerializedSize for TrackStrings {
+    // TODO(acrilique): Rows have to fit inside, at most, (page - header) size
+    // (not accounting for offsets) so at some level we must enforce a size
+    // limit for all string fields
+    fn serialized_size(&self) -> u16 {
+        self.isrc.serialized_size()
+            + self.lyricist.serialized_size()
+            + self.unknown_string2.serialized_size()
+            + self.unknown_string3.serialized_size()
+            + self.unknown_string4.serialized_size()
+            + self.message.serialized_size()
+            + self.publish_track_information.serialized_size()
+            + self.autoload_hotcues.serialized_size()
+            + self.unknown_string5.serialized_size()
+            + self.unknown_string6.serialized_size()
+            + self.date_added.serialized_size()
+            + self.release_date.serialized_size()
+            + self.mix_name.serialized_size()
+            + self.unknown_string7.serialized_size()
+            + self.analyze_path.serialized_size()
+            + self.analyze_date.serialized_size()
+            + self.comment.serialized_size()
+            + self.title.serialized_size()
+            + self.unknown_string8.serialized_size()
+            + self.filename.serialized_size()
+            + self.file_path.serialized_size()
+    }
+}
+
 /// Contains the album name, along with an ID of the corresponding artist.
 #[binrw]
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -1416,6 +1541,13 @@ impl RowVariant for Track {
     }
 }
 
+impl SerializedSize for Track {
+    fn serialized_size(&self) -> u16 {
+        // Fixed header = 0x5C = 92 bytes (confirmed by brw args)
+        92 + self.offsets.serialized_size()
+    }
+}
+
 /// Visibility state for a Menu on the CDJ.
 #[binrw]
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -1462,6 +1594,13 @@ pub struct Menu {
     /// Visual position in the menu list.
     /// 0 is valid and places the item at the very top (if visible).
     pub sort_order: u16,
+}
+
+impl SerializedSize for Menu {
+    fn serialized_size(&self) -> u16 {
+        // category_id(2) + content_pointer(2) + unknown(1) + visibility(1) + sort_order(2) = 8
+        8
+    }
 }
 
 /// A table row contains the actual data.
@@ -1525,6 +1664,27 @@ pub enum PlainRow {
     Track(Track),
 }
 
+impl SerializedSize for PlainRow {
+    fn serialized_size(&self) -> u16 {
+        match self {
+            Self::Album(row) => row.serialized_size(),
+            Self::Artist(row) => row.serialized_size(),
+            Self::Artwork(row) => row.serialized_size(),
+            Self::Color(row) => row.serialized_size(),
+            Self::Genre(row) => row.serialized_size(),
+            Self::HistoryPlaylist(row) => row.serialized_size(),
+            Self::HistoryEntry(row) => row.serialized_size(),
+            Self::Key(row) => row.serialized_size(),
+            Self::Label(row) => row.serialized_size(),
+            Self::PlaylistTreeNode(row) => row.serialized_size(),
+            Self::PlaylistEntry(row) => row.serialized_size(),
+            Self::ColumnEntry(row) => row.serialized_size(),
+            Self::Menu(row) => row.serialized_size(),
+            Self::Track(row) => row.serialized_size(),
+        }
+    }
+}
+
 /// A table row contains the actual data.
 #[binrw]
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -1571,5 +1731,14 @@ impl Row {
     #[must_use]
     pub fn as_variant_mut<T: RowVariant>(&mut self) -> Option<&mut T> {
         T::from_row_mut(self)
+    }
+}
+
+impl SerializedSize for Row {
+    fn serialized_size(&self) -> u16 {
+        match self {
+            Self::Plain(row) => row.serialized_size(),
+            Self::Ext(row) => row.serialized_size(),
+        }
     }
 }

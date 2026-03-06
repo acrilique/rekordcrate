@@ -9,6 +9,7 @@ use super::ext::*;
 use super::*;
 use crate::util::testing::{test_roundtrip, test_roundtrip_with_args};
 use crate::util::{ColorIndex, FileType};
+use binrw::BinWrite;
 use std::collections::BTreeMap;
 use std::num::NonZero;
 
@@ -11859,4 +11860,238 @@ fn index_page() {
         (page_size, DatabaseType::Plain),
         (page_size,),
     );
+}
+
+/// Helper: serialize a row type to bytes and return the length.
+fn written_size<T: BinWrite + binrw::meta::WriteEndian>(obj: &T) -> u16
+where
+    for<'a> <T as BinWrite>::Args<'a>: Default,
+{
+    let mut writer = binrw::io::Cursor::new(Vec::new());
+    obj.write(&mut writer).unwrap();
+    writer.into_inner().len() as u16
+}
+
+#[test]
+fn serialized_size_track() {
+    let bin: &[u8] = &[
+        36, 0, 0, 0, 0, 7, 12, 0, 68, 172, 0, 0, 0, 0, 0, 0, 168, 71, 105, 0, 218, 177, 193, 12,
+        128, 250, 231, 5, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 64, 1, 0, 0,
+        0, 0, 0, 0, 0, 50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        16, 0, 172, 0, 41, 0, 0, 0, 1, 0, 3, 0, 136, 0, 137, 0, 138, 0, 140, 0, 142, 0, 143, 0,
+        144, 0, 145, 0, 148, 0, 149, 0, 150, 0, 161, 0, 162, 0, 163, 0, 164, 0, 208, 0, 219, 0,
+        249, 0, 6, 1, 7, 1, 24, 1, 3, 3, 5, 51, 5, 51, 3, 3, 3, 7, 79, 78, 3, 3, 23, 50, 48, 49,
+        56, 45, 48, 53, 45, 50, 53, 3, 3, 3, 89, 47, 80, 73, 79, 78, 69, 69, 82, 47, 85, 83, 66,
+        65, 78, 76, 90, 47, 80, 48, 49, 54, 47, 48, 48, 48, 48, 56, 55, 53, 69, 47, 65, 78, 76, 90,
+        48, 48, 48, 48, 46, 68, 65, 84, 23, 50, 48, 50, 50, 45, 48, 50, 45, 48, 50, 61, 84, 114,
+        97, 99, 107, 115, 32, 98, 121, 32, 119, 119, 119, 46, 108, 111, 111, 112, 109, 97, 115,
+        116, 101, 114, 115, 46, 99, 111, 109, 27, 68, 101, 109, 111, 32, 84, 114, 97, 99, 107, 32,
+        49, 3, 35, 68, 101, 109, 111, 32, 84, 114, 97, 99, 107, 32, 49, 46, 109, 112, 51, 105, 47,
+        67, 111, 110, 116, 101, 110, 116, 115, 47, 76, 111, 111, 112, 109, 97, 115, 116, 101, 114,
+        115, 47, 85, 110, 107, 110, 111, 119, 110, 65, 108, 98, 117, 109, 47, 68, 101, 109, 111,
+        32, 84, 114, 97, 99, 107, 32, 49, 46, 109, 112, 51,
+    ];
+    let mut cursor = binrw::io::Cursor::new(bin);
+    let row = Track::read(&mut cursor).unwrap();
+    assert_eq!(row.serialized_size(), bin.len() as u16);
+}
+
+#[test]
+fn serialized_size_artist() {
+    let bin: &[u8] = &[
+        96, 0, 0, 0, 1, 0, 0, 0, 3, 10, 25, 76, 111, 111, 112, 109, 97, 115, 116, 101, 114, 115,
+    ];
+    let mut cursor = binrw::io::Cursor::new(bin);
+    let row = Artist::read(&mut cursor).unwrap();
+    assert_eq!(row.serialized_size(), bin.len() as u16);
+}
+
+#[test]
+fn serialized_size_album() {
+    let bin: &[u8] = &[
+        0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x16, 0x15, 0x47, 0x4f, 0x4f, 0x44, 0x20, 0x4c, 0x55,
+        0x43, 0x4b,
+    ];
+    let mut cursor = binrw::io::Cursor::new(bin);
+    let row = Album::read(&mut cursor).unwrap();
+    assert_eq!(row.serialized_size(), bin.len() as u16);
+}
+
+#[test]
+fn serialized_size_label() {
+    let bin: &[u8] = &[
+        1, 0, 0, 0, 25, 76, 111, 111, 112, 109, 97, 115, 116, 101, 114, 115,
+    ];
+    let mut cursor = binrw::io::Cursor::new(bin);
+    let row = Label::read(&mut cursor).unwrap();
+    assert_eq!(row.serialized_size(), bin.len() as u16);
+}
+
+#[test]
+fn serialized_size_key() {
+    let bin: &[u8] = &[1, 0, 0, 0, 1, 0, 0, 0, 7, 68, 109];
+    let mut cursor = binrw::io::Cursor::new(bin);
+    let row = Key::read(&mut cursor).unwrap();
+    assert_eq!(row.serialized_size(), bin.len() as u16);
+}
+
+#[test]
+fn serialized_size_color() {
+    let bin: &[u8] = &[0, 0, 0, 0, 1, 1, 0, 0, 11, 80, 105, 110, 107];
+    let mut cursor = binrw::io::Cursor::new(bin);
+    let row = Color::read(&mut cursor).unwrap();
+    assert_eq!(row.serialized_size(), bin.len() as u16);
+}
+
+#[test]
+fn serialized_size_playlist_tree_node() {
+    let bin: &[u8] = &[
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0x33, 0x63, 0x75, 0x72, 0x72,
+        0x65, 0x6e, 0x74, 0x20, 0x73, 0x65, 0x74, 0x20, 0x32, 0x30, 0x32, 0x31, 0x20, 0x72, 0x65,
+        0x64, 0x75, 0x63, 0x65, 0x64,
+    ];
+    let mut cursor = binrw::io::Cursor::new(bin);
+    let row = PlaylistTreeNode::read(&mut cursor).unwrap();
+    assert_eq!(row.serialized_size(), bin.len() as u16);
+}
+
+#[test]
+fn serialized_size_playlist_entry() {
+    let row = PlaylistEntry {
+        entry_index: 1,
+        track_id: TrackId(1),
+        playlist_id: PlaylistTreeNodeId(6),
+    };
+    assert_eq!(row.serialized_size(), 12);
+    assert_eq!(row.serialized_size(), written_size(&row));
+}
+
+#[test]
+fn serialized_size_column_entry() {
+    let bin: &[u8] = &[
+        0x01, 0x00, 0x80, 0x00, 0x90, 0x12, 0x00, 0x00, 0xfa, 0xff, 0x47, 0x00, 0x45, 0x00, 0x4e,
+        0x00, 0x52, 0x00, 0x45, 0x00, 0xfb, 0xff,
+    ];
+    let mut cursor = binrw::io::Cursor::new(bin);
+    let row = ColumnEntry::read(&mut cursor).unwrap();
+    assert_eq!(row.serialized_size(), bin.len() as u16);
+}
+
+#[test]
+fn serialized_size_menu() {
+    let row = Menu {
+        category_id: 2,
+        content_pointer: 2,
+        unknown: 2,
+        visibility: MenuVisibility::Visible,
+        sort_order: 1,
+    };
+    assert_eq!(row.serialized_size(), 8);
+    assert_eq!(row.serialized_size(), written_size(&row));
+}
+
+#[test]
+fn serialized_size_genre() {
+    let row = Genre {
+        id: GenreId(168),
+        name: "#techno #deep #beatdown".parse().unwrap(),
+    };
+    assert_eq!(row.serialized_size(), written_size(&row));
+}
+
+#[test]
+fn serialized_size_artwork() {
+    let row = Artwork {
+        id: ArtworkId(1),
+        path: "/PIONEER/Artwork/00001/a1.jpg".parse().unwrap(),
+    };
+    assert_eq!(row.serialized_size(), written_size(&row));
+}
+
+#[test]
+fn serialized_size_history_playlist() {
+    let row = HistoryPlaylist {
+        id: HistoryPlaylistId(1),
+        name: "HISTORY 001".parse().unwrap(),
+    };
+    assert_eq!(row.serialized_size(), written_size(&row));
+}
+
+#[test]
+fn serialized_size_history_entry() {
+    let row = HistoryEntry {
+        track_id: TrackId(35),
+        playlist_id: HistoryPlaylistId(2),
+        entry_index: 1,
+    };
+    assert_eq!(row.serialized_size(), 12);
+    assert_eq!(row.serialized_size(), written_size(&row));
+}
+
+#[test]
+fn serialized_size_track_tag() {
+    let row = TrackTag {
+        track_id: TrackId(1),
+        tag_id: TagId(2498240426),
+        unknown_const: 3,
+    };
+    assert_eq!(row.serialized_size(), 16);
+    assert_eq!(row.serialized_size(), written_size(&row));
+}
+
+#[test]
+fn serialized_size_tag_or_category() {
+    let row = TagOrCategory {
+        subtype: Subtype(1664),
+        index_shift: 0,
+        unknown1: 0,
+        unknown2: 0,
+        parent_id: ParentId(None),
+        position: 0,
+        id: TagId(1),
+        raw_is_category: 16777216,
+        offsets: OffsetArrayContainer {
+            offsets: OffsetArray::U8([31, 44]),
+            inner: TagOrCategoryStrings {
+                name: "TagCategory1".parse().unwrap(),
+                unknown: "".parse().unwrap(),
+            },
+        },
+    };
+    assert_eq!(row.serialized_size(), written_size(&row));
+}
+
+#[test]
+fn serialized_size_plain_row_delegates() {
+    let row = PlainRow::Genre(Genre {
+        id: GenreId(1),
+        name: "House".parse().unwrap(),
+    });
+    let inner = Genre {
+        id: GenreId(1),
+        name: "House".parse().unwrap(),
+    };
+    assert_eq!(row.serialized_size(), inner.serialized_size());
+}
+
+#[test]
+fn serialized_size_ext_row_delegates() {
+    let inner = TrackTag {
+        track_id: TrackId(1),
+        tag_id: TagId(100),
+        unknown_const: 3,
+    };
+    let row = ExtRow::TrackTag(inner.clone());
+    assert_eq!(row.serialized_size(), inner.serialized_size());
+}
+
+#[test]
+fn serialized_size_row_delegates() {
+    let inner = Label {
+        id: LabelId(1),
+        name: "Test".parse().unwrap(),
+    };
+    let row = Row::Plain(PlainRow::Label(inner.clone()));
+    assert_eq!(row.serialized_size(), inner.serialized_size());
 }

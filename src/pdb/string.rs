@@ -124,6 +124,15 @@ impl DeviceSQLString {
         }
     }
 
+    /// Returns the total number of bytes this string occupies when serialized to wire format.
+    #[must_use]
+    pub fn serialized_size(&self) -> u16 {
+        match &self.0 {
+            DeviceSQLStringImpl::ShortASCII { content } => 1 + content.len() as u16,
+            DeviceSQLStringImpl::Long { content } => 4 + content.byte_count().unwrap(),
+        }
+    }
+
     /// Create an empty [`DeviceSQLString`].
     ///
     /// Should be used to construct known empty strings.
