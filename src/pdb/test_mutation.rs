@@ -627,3 +627,38 @@ fn allocate_row_full_page() {
     assert!(entry.is_none());
     assert_eq!(0, page.header.used_size);
 }
+
+#[test]
+fn new_empty_data_page() {
+    let page_size = 4096u32;
+    let page_index = PageIndex::try_from(5).unwrap();
+    let page_type = PageType::Plain(PlainPageType::Keys);
+
+    let page = Page::new_empty_data(page_index, page_type, page_size);
+
+    assert_eq!(page.header.page_index, page_index);
+    assert_eq!(page.header.page_type, page_type);
+    assert_eq!(page.header.page_flags, PageFlags(0x24));
+    assert_eq!(page.header.used_size, 0);
+    assert_eq!(
+        page.header.free_size,
+        (page_size - PageHeader::BINARY_SIZE - DataPageHeader::BINARY_SIZE) as u16
+    );
+    assert_eq!(page.header.packed_row_counts.num_rows(), 0);
+    assert_eq!(page.header.packed_row_counts.num_rows_valid(), 0);
+    assert_eq!(page.header.next_page, PageIndex(6));
+
+    let dpc = page.content.as_data().expect("expected data page");
+    assert!(dpc.rows.is_empty());
+    assert!(dpc.row_groups.is_empty());
+}
+
+#[test]
+fn row_page_type_plain() {
+    let row = Row::Plain(PlainRow::Key(Key {
+        id: KeyId(1),
+        id2: 1,
+        name: "Emin".parse().unwrap(),
+    }));
+    assert_eq!(row.page_type(), PageType::Plain(PlainPageType::Keys));
+}

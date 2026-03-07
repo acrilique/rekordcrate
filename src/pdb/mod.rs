@@ -54,6 +54,14 @@ pub enum PdbError {
     /// Invalid flags were passed when creating an `IndexEntry`.
     #[error("Invalid index flags (expected max 3 bits): {0:#b}")]
     InvalidIndexFlags(u8),
+    /// A row is too large to fit into a fresh empty page.
+    #[error("Row too large to fit in a single page (requires {row_bytes} bytes, page has {page_capacity} bytes)")]
+    RowTooLarge {
+        /// The number of bytes the row requires.
+        row_bytes: u16,
+        /// The capacity of a fresh empty page.
+        page_capacity: u16,
+    },
 }
 
 /// The type of the database were looking at.
@@ -147,6 +155,16 @@ pub trait RowVariant {
     fn from_row(row: &Row) -> Option<&Self>;
     /// Extracts a mutable reference to this row variant from a generic `Row`.
     fn from_row_mut(row: &mut Row) -> Option<&mut Self>;
+}
+
+/// A reference to a row in the database, identified by its page index and heap offset within the
+/// page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RowRef {
+    /// The index of the page containing the row.
+    pub page: PageIndex,
+    /// The heap offset of the row within the page.
+    pub offset: u16,
 }
 
 /// Points to a table page and can be used to calculate the page's file offset by multiplying it
@@ -585,6 +603,40 @@ pub struct Page {
 }
 
 impl Page {
+    /// Creates a new empty data page with the given index, type, and page size.
+    ///
+    /// The `next_page` field is initialized to a past-end sentinel value. The caller is
+    /// responsible for linking this page into a table's page chain.
+    #[must_use]
+    pub fn new_empty_data(page_index: PageIndex, page_type: PageType, page_size: u32) -> Self {
+        let free_size = (page_size - PageHeader::BINARY_SIZE - DataPageHeader::BINARY_SIZE) as u16;
+        Self {
+            header: PageHeader {
+                page_index,
+                page_type,
+                next_page: PageIndex(page_index.0.saturating_add(1)),
+                unknown1: 0,
+                unknown2: 0,
+                packed_row_counts: PackedRowCounts::new()
+                    .with_num_rows(0)
+                    .with_num_rows_valid(0),
+                page_flags: PageFlags(0x24),
+                free_size,
+                used_size: 0,
+            },
+            content: PageContent::Data(DataPageContent {
+                header: DataPageHeader {
+                    unknown5: 0,
+                    unknown_not_num_rows_large: 0,
+                    unknown6: 0,
+                    unknown7: 0,
+                },
+                row_groups: vec![],
+                rows: BTreeMap::new(),
+            }),
+        }
+    }
+
     /// Allocate a new row and return a vacant entry in the row map for it,
     /// or `None` if there is not enough free space in the page.
     pub fn allocate_row(&mut self, bytes: u16) -> Option<btree_map::VacantEntry<'_, u16, Row>> {
@@ -2007,6 +2059,33 @@ impl Row {
     #[must_use]
     pub fn as_variant_mut<T: RowVariant>(&mut self) -> Option<&mut T> {
         T::from_row_mut(self)
+    }
+
+    /// Returns the [`PageType`] that corresponds to this row variant.
+    #[must_use]
+    pub fn page_type(&self) -> PageType {
+        match self {
+            Row::Plain(plain_row) => PageType::Plain(match plain_row {
+                PlainRow::Album(_) => PlainPageType::Albums,
+                PlainRow::Artist(_) => PlainPageType::Artists,
+                PlainRow::Artwork(_) => PlainPageType::Artwork,
+                PlainRow::Color(_) => PlainPageType::Colors,
+                PlainRow::Genre(_) => PlainPageType::Genres,
+                PlainRow::HistoryPlaylist(_) => PlainPageType::HistoryPlaylists,
+                PlainRow::HistoryEntry(_) => PlainPageType::HistoryEntries,
+                PlainRow::Key(_) => PlainPageType::Keys,
+                PlainRow::Label(_) => PlainPageType::Labels,
+                PlainRow::PlaylistTreeNode(_) => PlainPageType::PlaylistTree,
+                PlainRow::PlaylistEntry(_) => PlainPageType::PlaylistEntries,
+                PlainRow::ColumnEntry(_) => PlainPageType::Columns,
+                PlainRow::Menu(_) => PlainPageType::Menu,
+                PlainRow::Track(_) => PlainPageType::Tracks,
+            }),
+            Row::Ext(ext_row) => PageType::Ext(match ext_row {
+                ExtRow::Tag(_) => ExtPageType::Tag,
+                ExtRow::TrackTag(_) => ExtPageType::TrackTag,
+            }),
+        }
     }
 }
 

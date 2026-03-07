@@ -222,6 +222,112 @@ impl<RW: Read + Write + Seek> Database<RW> {
         self.flush()?;
         Ok(())
     }
+
+    /// Allocates a new empty data page for the given page type and links it into the table's page
+    /// chain.
+    ///
+    /// The new page is inserted at `header.next_unused_page`, linked after the current last page
+    /// in the table, and becomes the new last page.
+    pub fn allocate_page(&mut self, page_type: PageType) -> RekordcrateResult<PageIndex> {
+        let new_page_index = self.content.header.next_unused_page;
+        let page_size = self.content.header.page_size;
+
+        // Look up the table and copy the old last page index.
+        let old_last_page = self
+            .content
+            .header
+            .find_table(page_type)
+            .ok_or(RekordcrateError::TableTypeNotPresent(page_type))?
+            .1
+            .last_page;
+
+        // Load the old last page and point it to the new page.
+        self.load_page(old_last_page)?;
+        // Re-borrow after load_page returns — the page is now guaranteed Loaded.
+        match &mut self.content.pages[old_last_page.0 as usize - 1] {
+            LazyPage::Loaded(page) => {
+                page.header.next_page = new_page_index;
+            }
+            _ => unreachable!(),
+        }
+
+        // Create the new empty page and append it to the pages vec.
+        let new_page = Page::new_empty_data(new_page_index, page_type, page_size);
+        self.content.pages.push(LazyPage::Loaded(new_page));
+
+        // Update the table's last_page and the header's next_unused_page.
+        self.content
+            .header
+            .find_table_mut(page_type)
+            .expect("table was found above")
+            .1
+            .last_page = new_page_index;
+        self.content.header.next_unused_page = PageIndex(
+            new_page_index
+                .0
+                .checked_add(1)
+                .expect("page index overflow"),
+        );
+
+        Ok(new_page_index)
+    }
+
+    /// Adds a row to the database, inserting it into the table that corresponds to the row's type.
+    ///
+    /// If the last page in the table's chain is full, a new page is allocated automatically.
+    /// Returns a [`RowRef`] identifying the location of the inserted row.
+    pub fn add_row(&mut self, row: Row) -> RekordcrateResult<RowRef> {
+        let page_type = row.page_type();
+        let bytes_required = row.heap_bytes_required(());
+
+        // Find the last page index for this table.
+        let last_page_index = self
+            .content
+            .header
+            .find_table(page_type)
+            .ok_or(RekordcrateError::TableTypeNotPresent(page_type))?
+            .1
+            .last_page;
+
+        // Load the last page and try to allocate space.
+        self.load_page(last_page_index)?;
+        let page = match &mut self.content.pages[last_page_index.0 as usize - 1] {
+            LazyPage::Loaded(page) => page,
+            _ => unreachable!(),
+        };
+
+        if let Some(entry) = page.allocate_row(bytes_required) {
+            let offset = *entry.key();
+            entry.insert(row);
+            return Ok(RowRef {
+                page: last_page_index,
+                offset,
+            });
+        }
+
+        // Page is full — allocate a new one and retry.
+        let new_page_index = self.allocate_page(page_type)?;
+        let new_page = match &mut self.content.pages[new_page_index.0 as usize - 1] {
+            LazyPage::Loaded(page) => page,
+            _ => unreachable!(),
+        };
+
+        match new_page.allocate_row(bytes_required) {
+            Some(entry) => {
+                let offset = *entry.key();
+                entry.insert(row);
+                Ok(RowRef {
+                    page: new_page_index,
+                    offset,
+                })
+            }
+            None => Err(PdbError::RowTooLarge {
+                row_bytes: bytes_required,
+                page_capacity: new_page.header.free_size,
+            }
+            .into()),
+        }
+    }
 }
 
 /// An iterator over pages in a PDB database.
@@ -314,6 +420,7 @@ impl<'db, R: Read + Seek> FallibleIterator for PageIterator<'db, R> {
 mod test {
     use super::*;
     use std::fs::File;
+    use std::io::Cursor;
 
     #[test]
     fn test_pageiterator_safety() {
@@ -347,5 +454,113 @@ mod test {
         let _iter3 = db
             .iter_pages(PageType::Plain(PlainPageType::Tracks))
             .unwrap();
+    }
+
+    #[test]
+    fn test_allocate_page() {
+        let mut data = Vec::from(include_bytes!("../../data/pdb/num_rows/export.pdb").as_slice());
+        let io = Cursor::new(data.as_mut_slice());
+        let mut db = Database::open(io, DatabaseType::Plain).unwrap();
+
+        let page_type = PageType::Plain(PlainPageType::Keys);
+        let old_next_unused = db.get_header().next_unused_page;
+        let old_last_page = db.get_header().find_table(page_type).unwrap().1.last_page;
+
+        let new_page_index = db.allocate_page(page_type).unwrap();
+
+        // New page index should be the old next_unused_page.
+        assert_eq!(new_page_index, old_next_unused);
+
+        // header.next_unused_page should have been incremented.
+        assert_eq!(
+            db.get_header().next_unused_page,
+            PageIndex(old_next_unused.0 + 1)
+        );
+
+        // table.last_page should now be the new page.
+        let table_last = db.get_header().find_table(page_type).unwrap().1.last_page;
+        assert_eq!(table_last, new_page_index);
+
+        // The old last page's next_page should point to the new page.
+        let old_last = db.load_page(old_last_page).unwrap();
+        assert_eq!(old_last.header.next_page, new_page_index);
+
+        // The new page should exist and be an empty data page.
+        let new_page = db.load_page(new_page_index).unwrap();
+        assert_eq!(new_page.header.page_index, new_page_index);
+        assert_eq!(new_page.header.page_type, page_type);
+        assert_eq!(new_page.header.used_size, 0);
+        assert!(new_page.content.as_data().unwrap().rows.is_empty());
+    }
+
+    #[test]
+    fn test_add_row() {
+        let mut data = Vec::from(include_bytes!("../../data/pdb/num_rows/export.pdb").as_slice());
+        let io = Cursor::new(data.as_mut_slice());
+        let mut db = Database::open(io, DatabaseType::Plain).unwrap();
+
+        let row = Row::Plain(PlainRow::Key(Key {
+            id: KeyId(100),
+            id2: 100,
+            name: "Cmin".parse().unwrap(),
+        }));
+
+        let row_ref = db.add_row(row).unwrap();
+
+        // Verify the row was inserted at the returned location.
+        let page = db.load_page(row_ref.page).unwrap();
+        let inserted_row = page
+            .content
+            .as_data()
+            .unwrap()
+            .rows
+            .get(&row_ref.offset)
+            .expect("row not found at returned offset");
+        let key = inserted_row
+            .as_variant::<Key>()
+            .expect("expected Key variant");
+        assert_eq!(key.id, KeyId(100));
+    }
+
+    #[test]
+    fn test_add_row_allocates_page_when_full() {
+        let mut data = Vec::from(include_bytes!("../../data/pdb/num_rows/export.pdb").as_slice());
+        let io = Cursor::new(data.as_mut_slice());
+        let mut db = Database::open(io, DatabaseType::Plain).unwrap();
+
+        let page_type = PageType::Plain(PlainPageType::Keys);
+        let initial_next_unused = db.get_header().next_unused_page;
+
+        // Fill the last page until it's full, then verify a new page gets allocated.
+        let mut allocated_new_page = false;
+        for i in 0..1000u32 {
+            let row = Row::Plain(PlainRow::Key(Key {
+                id: KeyId(i),
+                id2: i,
+                name: "TestKey".parse().unwrap(),
+            }));
+            let row_ref = db.add_row(row).unwrap();
+
+            if db.get_header().next_unused_page != initial_next_unused {
+                // A new page was allocated.
+                allocated_new_page = true;
+                // The row should be on the newly allocated page.
+                let table_last = db.get_header().find_table(page_type).unwrap().1.last_page;
+                assert_eq!(row_ref.page, table_last);
+                break;
+            }
+        }
+        assert!(allocated_new_page, "expected a new page to be allocated");
+    }
+
+    #[test]
+    fn test_allocate_page_table_not_present() {
+        let mut data = Vec::from(include_bytes!("../../data/pdb/num_rows/export.pdb").as_slice());
+        let io = Cursor::new(data.as_mut_slice());
+        let mut db = Database::open(io, DatabaseType::Plain).unwrap();
+
+        // Ext page types should not have a table in a Plain database.
+        let result = db.allocate_page(PageType::Ext(ExtPageType::Tag));
+        assert!(result.is_err());
     }
 }
