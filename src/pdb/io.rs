@@ -198,6 +198,60 @@ impl<R: Read + Seek> Database<R> {
 }
 
 impl<RW: Read + Write + Seek> Database<RW> {
+    /// Creates a new empty PDB database with the given table page types.
+    ///
+    /// For each page type, only an index page is allocated, with `next_page` set to the sentinel
+    /// value. The table's `first_page` and `last_page` both point to the index page. Data pages
+    /// are allocated on demand when rows are added via [`add_row`](Self::add_row).
+    pub fn create(
+        io: RW,
+        db_type: DatabaseType,
+        table_page_types: &[PageType],
+    ) -> RekordcrateResult<Self> {
+        let page_size: u32 = 4096;
+        let num_tables = table_page_types.len();
+
+        let mut pages = Vec::with_capacity(num_tables);
+        let mut tables = Vec::with_capacity(num_tables);
+
+        for (i, page_type) in table_page_types.iter().enumerate() {
+            let index_page_index = PageIndex((i + 1) as u32);
+
+            let index_page = Page::new_empty_index(
+                index_page_index,
+                *page_type,
+                PageIndex::sentinel(),
+                page_size,
+            );
+
+            pages.push(LazyPage::Loaded(index_page));
+
+            tables.push(Table {
+                page_type: *page_type,
+                empty_candidate: index_page_index.0,
+                first_page: index_page_index,
+                last_page: index_page_index,
+            });
+        }
+
+        let header = Header {
+            page_size,
+            num_tables: num_tables as u32,
+            next_unused_page: PageIndex((num_tables + 1) as u32),
+            unknown: 0,
+            sequence: 0,
+            tables,
+        };
+
+        let content = LazyDatabase { header, pages };
+
+        Ok(Self {
+            io,
+            db_type,
+            content,
+        })
+    }
+
     /// Opens a PDB database for reading and writing.
     pub fn open(mut io: RW, db_type: DatabaseType) -> RekordcrateResult<Self> {
         let endian = Endian::Little;
