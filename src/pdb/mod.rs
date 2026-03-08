@@ -191,6 +191,12 @@ impl PageIndex {
     pub fn offset(&self, page_size: u32) -> u64 {
         u64::from(self.0) * u64::from(page_size)
     }
+
+    /// A sentinel value that points past the end of the file, used to indicate the end of page chains.
+    #[must_use]
+    pub fn sentinel() -> Self {
+        Self(0x03FF_FFFF)
+    }
 }
 
 /// Tables are linked lists of pages containing rows of a single type, which are organized
@@ -644,7 +650,7 @@ impl Page {
 
     /// Creates a new empty data page with the given index, type, and page size.
     ///
-    /// The `next_page` field is initialized to a past-end sentinel value. The caller is
+    /// The `next_page` field is initialized to the sentinel value. The caller is
     /// responsible for linking this page into a table's page chain.
     #[must_use]
     pub fn new_empty_data(page_index: PageIndex, page_type: PageType, page_size: u32) -> Self {
@@ -653,7 +659,7 @@ impl Page {
             header: PageHeader {
                 page_index,
                 page_type,
-                next_page: PageIndex(page_index.0.saturating_add(1)),
+                next_page: PageIndex::sentinel(),
                 unknown1: 0,
                 unknown2: 0,
                 packed_row_counts: PackedRowCounts::new()

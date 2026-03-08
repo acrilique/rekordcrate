@@ -646,7 +646,7 @@ fn new_empty_data_page() {
     );
     assert_eq!(page.header.packed_row_counts.num_rows(), 0);
     assert_eq!(page.header.packed_row_counts.num_rows_valid(), 0);
-    assert_eq!(page.header.next_page, PageIndex(6));
+    assert_eq!(page.header.next_page, PageIndex::sentinel());
 
     let dpc = page.content.as_data().expect("expected data page");
     assert!(dpc.rows.is_empty());
