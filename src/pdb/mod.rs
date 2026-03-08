@@ -140,10 +140,9 @@ pub enum PlainPageType {
     /// Manages the active menus on the CDJ.
     #[brw(magic = 17u32)]
     Menu,
-    // Holds information used by rekordbox to synchronize history playlists (not yet studied).
-    // Commented out until we have the corresponding Row variant.
-    // #[brw(magic = 19u32)]
-    // History,
+    /// Holds information used by rekordbox to synchronize history playlists.
+    #[brw(magic = 19u32)]
+    History,
 }
 
 /// A row variant that can be extracted from a generic `Row`.
@@ -1379,6 +1378,72 @@ impl PageHeapObject for HistoryEntry {
     }
 }
 
+/// Represents a history sync row, used by rekordbox to synchronize history playlists.
+///
+/// This table functions as a write-then-consume queue for history playlist synchronization.
+/// Rows are bulk-written during sync and then deleted (presence flags cleared), leaving a
+/// single sentinel row with `unknown = 0` and no device name.
+#[binrw]
+#[derive(Debug, PartialEq, Eq, Clone)]
+#[brw(little)]
+pub struct History {
+    /// Subtype field, usually `80 02`.
+    subtype: Subtype,
+    /// Unknown field, called `index_shift` by [@flesniak](https://github.com/flesniak).
+    /// Appears to always be 0x20 * row index.
+    index_shift: u16,
+    /// Unknown field.
+    ///
+    /// The values vary and don't appear to follow a clear pattern. In one export, a
+    /// value here matched the total track count in the database.
+    unknown: u32,
+    /// Unknown field, always 0.
+    zeroes: u32,
+    /// Sync date, e.g. "2022-02-02", "2024-04-18".
+    date: DeviceSQLString,
+    /// Fixed protocol marker, always `7705`.
+    magic: u16,
+    /// Format/protocol version string, always "1000".
+    version: DeviceSQLString,
+    /// Device or backup label, or empty.
+    label: DeviceSQLString,
+}
+
+impl RowVariant for History {
+    const PAGE_TYPE: PageType = PageType::Plain(PlainPageType::History);
+
+    fn from_row(row: &Row) -> Option<&Self> {
+        match row {
+            Row::Plain(PlainRow::History(row)) => Some(row),
+            _ => None,
+        }
+    }
+    fn from_row_mut(row: &mut Row) -> Option<&mut Self> {
+        match row {
+            Row::Plain(PlainRow::History(row)) => Some(row),
+            _ => None,
+        }
+    }
+}
+
+impl PageHeapObject for History {
+    type Args<'a> = ();
+    fn heap_bytes_required(&self, _: ()) -> u16 {
+        [
+            self.subtype.heap_bytes_required(()),
+            self.index_shift.heap_bytes_required(()),
+            self.unknown.heap_bytes_required(()),
+            self.zeroes.heap_bytes_required(()),
+            self.date.heap_bytes_required(()),
+            self.magic.heap_bytes_required(()),
+            self.version.heap_bytes_required(()),
+            self.label.heap_bytes_required(()),
+        ]
+        .iter()
+        .sum()
+    }
+}
+
 /// Represents a musical key.
 #[binrw]
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -1964,6 +2029,9 @@ pub enum PlainRow {
     /// Represents a history playlist.
     #[br(pre_assert(page_type == PlainPageType::HistoryEntries))]
     HistoryEntry(HistoryEntry),
+    /// Represents a history sync row.
+    #[br(pre_assert(page_type == PlainPageType::History))]
+    History(History),
     /// Represents a musical key.
     #[br(pre_assert(page_type == PlainPageType::Keys))]
     Key(Key),
@@ -2000,6 +2068,7 @@ impl PageHeapObject for PlainRow {
             PlainRow::Genre(genre) => genre.heap_bytes_required(()),
             PlainRow::HistoryPlaylist(history_playlist) => history_playlist.heap_bytes_required(()),
             PlainRow::HistoryEntry(history_entry) => history_entry.heap_bytes_required(()),
+            PlainRow::History(history) => history.heap_bytes_required(()),
             PlainRow::Key(key) => key.heap_bytes_required(()),
             PlainRow::Label(label) => label.heap_bytes_required(()),
             PlainRow::PlaylistTreeNode(playlist_tree_node) => {
@@ -2073,6 +2142,7 @@ impl Row {
                 PlainRow::Genre(_) => PlainPageType::Genres,
                 PlainRow::HistoryPlaylist(_) => PlainPageType::HistoryPlaylists,
                 PlainRow::HistoryEntry(_) => PlainPageType::HistoryEntries,
+                PlainRow::History(_) => PlainPageType::History,
                 PlainRow::Key(_) => PlainPageType::Keys,
                 PlainRow::Label(_) => PlainPageType::Labels,
                 PlainRow::PlaylistTreeNode(_) => PlainPageType::PlaylistTree,
