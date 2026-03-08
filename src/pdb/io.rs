@@ -247,6 +247,10 @@ impl<RW: Read + Write + Seek> Database<RW> {
         match &mut self.content.pages[old_last_page.0 as usize - 1] {
             LazyPage::Loaded(page) => {
                 page.header.next_page = new_page_index;
+                // If the old last page is an index page, also update its inner next_page.
+                if let PageContent::Index(ref mut ic) = page.content {
+                    ic.header.next_page = new_page_index;
+                }
             }
             _ => unreachable!(),
         }
