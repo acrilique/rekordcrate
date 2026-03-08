@@ -602,6 +602,46 @@ pub struct Page {
 }
 
 impl Page {
+    /// Creates a new empty index page with the given index, type, and page size.
+    ///
+    /// The `next_page` field is set to the provided value (use `PageIndex::sentinel()` for a
+    /// page that does not link to any data page).
+    #[must_use]
+    pub fn new_empty_index(
+        page_index: PageIndex,
+        page_type: PageType,
+        next_page: PageIndex,
+        _page_size: u32,
+    ) -> Self {
+        Self {
+            header: PageHeader {
+                page_index,
+                page_type,
+                next_page,
+                unknown1: 0,
+                unknown2: 0,
+                packed_row_counts: PackedRowCounts::new()
+                    .with_num_rows(0)
+                    .with_num_rows_valid(0),
+                page_flags: PageFlags(0x64),
+                free_size: 0,
+                used_size: 0,
+            },
+            content: PageContent::Index(IndexPageContent {
+                header: IndexPageHeader {
+                    unknown_a: 0x1fff,
+                    unknown_b: 0x1fff,
+                    next_offset: 0,
+                    page_index,
+                    next_page,
+                    num_entries: 0,
+                    first_empty: 0x1fff,
+                },
+                entries: vec![],
+            }),
+        }
+    }
+
     /// Creates a new empty data page with the given index, type, and page size.
     ///
     /// The `next_page` field is initialized to a past-end sentinel value. The caller is
