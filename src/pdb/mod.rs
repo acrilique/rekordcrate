@@ -1259,6 +1259,63 @@ impl ArtistBuilder {
     }
 }
 
+impl Default for Album {
+    fn default() -> Self {
+        Self {
+            subtype: Subtype(0x80),
+            index_shift: 0,
+            unknown2: 0,
+            artist_id: ArtistId(0),
+            id: AlbumId(0),
+            unknown3: 0,
+            offsets: OffsetArrayContainer::default(),
+        }
+    }
+}
+
+/// Builder for constructing [`Album`] instances.
+#[derive(Debug, Default)]
+pub struct AlbumBuilder {
+    album: Album,
+}
+
+impl Album {
+    /// Returns a new [`AlbumBuilder`] for constructing an `Album`.
+    #[must_use]
+    pub fn builder() -> AlbumBuilder {
+        AlbumBuilder::default()
+    }
+}
+
+impl AlbumBuilder {
+    /// Set the album ID.
+    #[must_use]
+    pub fn id(mut self, id: u32) -> Self {
+        self.album.id = AlbumId(id);
+        self
+    }
+
+    /// Set the artist ID associated with this album.
+    #[must_use]
+    pub fn artist_id(mut self, id: u32) -> Self {
+        self.album.artist_id = ArtistId(id);
+        self
+    }
+
+    /// Set the album name.
+    #[must_use]
+    pub fn name(mut self, name: DeviceSQLString) -> Self {
+        self.album.offsets.inner.name = name;
+        self
+    }
+
+    /// Consume the builder and return the constructed [`Album`].
+    #[must_use]
+    pub fn build(self) -> Album {
+        self.album
+    }
+}
+
 /// Contains the artwork path and ID.
 #[binrw]
 #[derive(Debug, PartialEq, Eq, Clone)]
