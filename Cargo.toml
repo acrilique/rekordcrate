@@ -16,6 +16,8 @@ binrw = "0.15"
 modular-bitfield = "0.13"
 crc16 = "0.4"
 clap = { version = "4.5", features = ["derive"], optional = true }
+lofty = { version = "0.23", optional = true }
+bpm-finder-tools = { version = "0.1", optional = true }
 parse-display = "0.10"
 thiserror = "2.0"
 quick-xml = { version = "0.38.4", features = ["serialize", "serde-types"] }
@@ -31,7 +33,7 @@ pretty_assertions = "1"
 
 [features]
 default = ["cli"]
-cli = ["dep:clap"]
+cli = ["dep:clap", "dep:lofty", "dep:bpm-finder-tools"]
 
 [[bin]]
 name = "rekordcrate"

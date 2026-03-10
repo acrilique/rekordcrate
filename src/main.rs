@@ -9,6 +9,7 @@
 use binrw::BinRead;
 use clap::{Parser, Subcommand};
 use fallible_iterator::FallibleIterator;
+use lofty::prelude::*;
 use rekordcrate::device::get_playlists;
 use rekordcrate::pdb::io::Database;
 use rekordcrate::pdb::*;
@@ -82,6 +83,15 @@ enum Commands {
         /// File to parse.
         #[arg(value_name = "XML_FILE")]
         path: PathBuf,
+    },
+    /// Export MP3 files to a Pioneer-compatible USB structure with a PDB database.
+    Export {
+        /// Input directory containing MP3 files.
+        #[arg(value_name = "INPUT_DIR")]
+        input_dir: PathBuf,
+        /// Output directory for the Pioneer export (default: current directory).
+        #[arg(value_name = "OUTPUT_DIR", default_value = ".")]
+        output_dir: PathBuf,
     },
 }
 
@@ -338,6 +348,292 @@ fn dump_xml(path: &Path) -> rekordcrate::Result<()> {
     Ok(())
 }
 
+fn export(input_dir: &Path, output_dir: &Path) -> rekordcrate::Result<()> {
+    use rekordcrate::pdb::string::DeviceSQLString;
+    use rekordcrate::util::FileType;
+    use std::collections::HashMap;
+
+    let rekordbox_dir = output_dir.join("PIONEER").join("rekordbox");
+    let contents_dir = output_dir.join("Contents");
+    std::fs::create_dir_all(&rekordbox_dir)?;
+    std::fs::create_dir_all(&contents_dir)?;
+
+    // Scan for MP3 files recursively.
+    fn find_mp3s(dir: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                find_mp3s(&path, files)?;
+            } else if path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("mp3"))
+            {
+                files.push(path);
+            }
+        }
+        Ok(())
+    }
+
+    let mut mp3_files = Vec::new();
+    find_mp3s(input_dir, &mut mp3_files)?;
+    mp3_files.sort();
+
+    if mp3_files.is_empty() {
+        eprintln!("No MP3 files found in {}", input_dir.display());
+        return Ok(());
+    }
+
+    println!("Found {} MP3 file(s)", mp3_files.len());
+
+    // Collect unique artists and albums, and assign IDs.
+    let mut artist_map: HashMap<String, u32> = HashMap::new();
+    let mut next_artist_id: u32 = 1;
+    let mut album_map: HashMap<(String, u32), u32> = HashMap::new();
+    let mut next_album_id: u32 = 1;
+
+    struct TrackInfo {
+        dest_filename: String,
+        title: String,
+        artist_name: String,
+        album_name: String,
+        duration_secs: u16,
+        sample_rate: u32,
+        bitrate: u32,
+        file_size: u32,
+        tempo: u32,
+    }
+
+    let mut track_infos = Vec::new();
+    let mut used_filenames: HashMap<String, u32> = HashMap::new();
+
+    for src_path in &mp3_files {
+        // Determine destination filename with dedup.
+        let original_stem = src_path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let dest_filename = {
+            let base = format!("{}.mp3", original_stem);
+            let count = used_filenames.entry(base.clone()).or_insert(0);
+            *count += 1;
+            if *count == 1 {
+                base
+            } else {
+                format!("{}_{}.mp3", original_stem, count)
+            }
+        };
+
+        // Copy file to Contents/.
+        let dest_path = contents_dir.join(&dest_filename);
+        std::fs::copy(src_path, &dest_path)?;
+
+        // Read metadata.
+        let file_size = std::fs::metadata(&dest_path)?.len() as u32;
+        let tagged_file = lofty::read_from_path(&dest_path)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+        let tag = tagged_file
+            .primary_tag()
+            .or_else(|| tagged_file.first_tag());
+
+        let title = tag
+            .and_then(|t| t.title().map(|s| s.to_string()))
+            .unwrap_or_else(|| original_stem.clone());
+
+        let artist_name = tag
+            .and_then(|t| t.artist().map(|s| s.to_string()))
+            .unwrap_or_default();
+
+        let album_name = tag
+            .and_then(|t| t.album().map(|s| s.to_string()))
+            .unwrap_or_default();
+
+        let properties = tagged_file.properties();
+        let duration_secs = properties.duration().as_secs() as u16;
+        let sample_rate = properties.sample_rate().unwrap_or(44100);
+        let bitrate = properties.overall_bitrate().unwrap_or(320);
+
+        // Analyze BPM.
+        let tempo = match bpm_finder_tools::file::analyze_path(&dest_path, 70.0, 200.0) {
+            Ok(analysis) => (analysis.bpm * 100.0) as u32,
+            Err(e) => {
+                eprintln!(
+                    "Warning: could not analyze BPM for {}: {e}",
+                    dest_path.display()
+                );
+                0
+            }
+        };
+
+        // Register artist.
+        if !artist_name.is_empty() && !artist_map.contains_key(&artist_name) {
+            artist_map.insert(artist_name.clone(), next_artist_id);
+            next_artist_id += 1;
+        }
+
+        // Register album (keyed by album name + artist ID for uniqueness).
+        if !album_name.is_empty() {
+            let artist_id = if artist_name.is_empty() {
+                0
+            } else {
+                artist_map[&artist_name]
+            };
+            let key = (album_name.clone(), artist_id);
+            if let std::collections::hash_map::Entry::Vacant(entry) = album_map.entry(key) {
+                entry.insert(next_album_id);
+                next_album_id += 1;
+            }
+        }
+
+        track_infos.push(TrackInfo {
+            dest_filename,
+            title,
+            artist_name,
+            album_name,
+            duration_secs,
+            sample_rate,
+            bitrate,
+            file_size,
+            tempo,
+        });
+    }
+
+    // Create the PDB database.
+    // Use the same 20-table layout as real rekordbox exports, including Unknown table types.
+    let table_page_types = vec![
+        PageType::Plain(PlainPageType::Tracks),
+        PageType::Plain(PlainPageType::Genres),
+        PageType::Plain(PlainPageType::Artists),
+        PageType::Plain(PlainPageType::Albums),
+        PageType::Plain(PlainPageType::Labels),
+        PageType::Plain(PlainPageType::Keys),
+        PageType::Plain(PlainPageType::Colors),
+        PageType::Plain(PlainPageType::PlaylistTree),
+        PageType::Plain(PlainPageType::PlaylistEntries),
+        PageType::Unknown(9),
+        PageType::Unknown(10),
+        PageType::Plain(PlainPageType::HistoryPlaylists),
+        PageType::Plain(PlainPageType::HistoryEntries),
+        PageType::Plain(PlainPageType::Artwork),
+        PageType::Unknown(14),
+        PageType::Unknown(15),
+        PageType::Plain(PlainPageType::Columns),
+        PageType::Plain(PlainPageType::Menu),
+        PageType::Unknown(18),
+        PageType::Plain(PlainPageType::History),
+    ];
+
+    let pdb_path = rekordbox_dir.join("export.pdb");
+    let pdb_file = File::create(&pdb_path)?;
+    let mut db = Database::create(pdb_file, DatabaseType::Plain, &table_page_types)?;
+
+    rekordcrate::pdb::defaults::insert_default_colors(&mut db)?;
+    rekordcrate::pdb::defaults::insert_default_columns(&mut db)?;
+    rekordcrate::pdb::defaults::insert_default_menus(&mut db)?;
+
+    // Insert history sync row with current date.
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    db.add_row(Row::Plain(PlainRow::History(History {
+        subtype: Subtype(640),
+        index_shift: 0,
+        unknown: 0,
+        zeroes: 0,
+        date: DeviceSQLString::new(&today)?,
+        magic: 7705,
+        version: DeviceSQLString::new("1000")?,
+        label: DeviceSQLString::empty(),
+    })))?;
+
+    // Insert artist rows.
+    for (name, &id) in &artist_map {
+        let artist = Artist::builder()
+            .id(id)
+            .name(DeviceSQLString::new(name)?)
+            .build();
+        db.add_row(Row::Plain(PlainRow::Artist(artist)))?;
+    }
+
+    // Insert album rows.
+    for ((album_name, artist_id), &id) in &album_map {
+        let album = Album::builder()
+            .id(id)
+            .artist_id(*artist_id)
+            .name(DeviceSQLString::new(album_name)?)
+            .build();
+        db.add_row(Row::Plain(PlainRow::Album(album)))?;
+    }
+
+    // Insert track rows.
+    for (i, info) in track_infos.iter().enumerate() {
+        let track_id = (i + 1) as u32;
+        let artist_id = if info.artist_name.is_empty() {
+            0
+        } else {
+            artist_map[&info.artist_name]
+        };
+        let album_id = if info.album_name.is_empty() {
+            0
+        } else {
+            album_map[&(info.album_name.clone(), artist_id)]
+        };
+
+        // Pioneer uses forward-slash paths relative to the USB root.
+        let pioneer_path = format!("/Contents/{}", info.dest_filename);
+
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+
+        let track = Track::builder()
+            .id(track_id)
+            .title(DeviceSQLString::new(&info.title)?)
+            .artist_id(artist_id)
+            .album_id(album_id)
+            .file_path(DeviceSQLString::new(&pioneer_path)?)
+            .filename(DeviceSQLString::new(&info.dest_filename)?)
+            .sample_rate(info.sample_rate)
+            .sample_depth(16)
+            .bitrate(info.bitrate)
+            .duration(info.duration_secs)
+            .file_size(info.file_size)
+            .file_type(FileType::Mp3)
+            .tempo(info.tempo)
+            .autoload_hotcues(DeviceSQLString::new("ON")?)
+            .date_added(DeviceSQLString::new(&today)?)
+            .build();
+        db.add_row(Row::Plain(PlainRow::Track(track)))?;
+
+        println!(
+            "  [{}] {} - {}{}",
+            track_id,
+            if info.artist_name.is_empty() {
+                "(unknown)"
+            } else {
+                &info.artist_name
+            },
+            info.title,
+            if info.album_name.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", info.album_name)
+            },
+        );
+    }
+
+    // Write the database.
+    db.close()?;
+
+    println!(
+        "\nExported {} track(s), {} artist(s), and {} album(s) to {}",
+        track_infos.len(),
+        artist_map.len(),
+        album_map.len(),
+        pdb_path.display(),
+    );
+
+    Ok(())
+}
+
 fn guess_db_type(path: &Path, db_type: Option<&str>) -> Option<DatabaseType> {
     let db_type_cli = db_type.map(|str| match str {
         "plain" => DatabaseType::Plain,
@@ -437,5 +733,9 @@ fn main() -> rekordcrate::Result<()> {
             dump_setting(path, setting_type)
         }
         Commands::DumpXML { path } => dump_xml(path),
+        Commands::Export {
+            input_dir,
+            output_dir,
+        } => export(input_dir, output_dir),
     }
 }
