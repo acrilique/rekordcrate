@@ -68,6 +68,15 @@ pub struct OffsetArrayContainer<T, const N: usize> {
     pub inner: T,
 }
 
+impl<T: Default, const N: usize> Default for OffsetArrayContainer<T, N> {
+    fn default() -> Self {
+        Self {
+            offsets: MaybeCalculated::Calculated,
+            inner: T::default(),
+        }
+    }
+}
+
 impl<T, const N: usize> std::ops::Deref for OffsetArrayContainer<T, N> {
     type Target = T;
     fn deref(&self) -> &Self::Target {

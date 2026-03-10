@@ -1085,7 +1085,7 @@ impl PageHeapObject for HistoryPlaylistId {
     }
 }
 
-#[derive(Debug, PartialEq, Clone, Eq)]
+#[derive(Debug, PartialEq, Clone, Eq, Default)]
 /// Represents a trailing name field at the end of a row, used for album and artist names.
 pub struct TrailingName {
     /// The name a the end of the row this is used in
@@ -1169,10 +1169,10 @@ impl PageHeapObject for Album {
 #[brw(little)]
 pub struct Artist {
     /// Determines if the `name` string is located at the 8-bit offset (0x60) or the 16-bit offset (0x64).
-    subtype: Subtype,
+    pub subtype: Subtype,
     /// Unknown field, called `index_shift` by [@flesniak](https://github.com/flesniak).
     /// Appears to always be 0x20 * row index.
-    index_shift: u16,
+    pub index_shift: u16,
     /// ID of this row.
     pub id: ArtistId,
     /// offsets at the row end
@@ -1209,6 +1209,53 @@ impl PageHeapObject for Artist {
         ]
         .iter()
         .sum()
+    }
+}
+
+impl Default for Artist {
+    fn default() -> Self {
+        Self {
+            subtype: Subtype(0x60),
+            index_shift: 0,
+            id: ArtistId(0),
+            offsets: OffsetArrayContainer::default(),
+        }
+    }
+}
+
+/// Builder for constructing [`Artist`] instances.
+#[derive(Debug, Default)]
+pub struct ArtistBuilder {
+    artist: Artist,
+}
+
+impl Artist {
+    /// Returns a new [`ArtistBuilder`] for constructing an `Artist`.
+    #[must_use]
+    pub fn builder() -> ArtistBuilder {
+        ArtistBuilder::default()
+    }
+}
+
+impl ArtistBuilder {
+    /// Set the artist ID.
+    #[must_use]
+    pub fn id(mut self, id: u32) -> Self {
+        self.artist.id = ArtistId(id);
+        self
+    }
+
+    /// Set the artist name.
+    #[must_use]
+    pub fn name(mut self, name: DeviceSQLString) -> Self {
+        self.artist.offsets.inner.name = name;
+        self
+    }
+
+    /// Consume the builder and return the constructed [`Artist`].
+    #[must_use]
+    pub fn build(self) -> Artist {
+        self.artist
     }
 }
 
@@ -1258,15 +1305,15 @@ impl PageHeapObject for Artwork {
 #[brw(little)]
 pub struct Color {
     /// Unknown field.
-    unknown1: u32,
+    pub unknown1: u32,
     /// Unknown field.
-    unknown2: u8,
+    pub unknown2: u8,
     /// Numeric color ID
-    color: ColorIndex,
+    pub color: ColorIndex,
     /// Unknown field.
-    unknown3: u16,
+    pub unknown3: u16,
     /// User-defined name of the color.
-    name: DeviceSQLString,
+    pub name: DeviceSQLString,
 }
 
 impl RowVariant for Color {
@@ -1434,25 +1481,25 @@ impl PageHeapObject for HistoryEntry {
 #[brw(little)]
 pub struct History {
     /// Subtype field, usually `80 02`.
-    subtype: Subtype,
+    pub subtype: Subtype,
     /// Unknown field, called `index_shift` by [@flesniak](https://github.com/flesniak).
     /// Appears to always be 0x20 * row index.
-    index_shift: u16,
+    pub index_shift: u16,
     /// Unknown field.
     ///
     /// The values vary and don't appear to follow a clear pattern. In one export, a
     /// value here matched the total track count in the database.
-    unknown: u32,
+    pub unknown: u32,
     /// Unknown field, always 0.
-    zeroes: u32,
+    pub zeroes: u32,
     /// Sync date, e.g. "2022-02-02", "2024-04-18".
-    date: DeviceSQLString,
+    pub date: DeviceSQLString,
     /// Fixed protocol marker, always `7705`.
-    magic: u16,
+    pub magic: u16,
     /// Format/protocol version string, always "1000".
-    version: DeviceSQLString,
+    pub version: DeviceSQLString,
     /// Device or backup label, or empty.
-    label: DeviceSQLString,
+    pub label: DeviceSQLString,
 }
 
 impl RowVariant for History {
@@ -1682,14 +1729,14 @@ impl PageHeapObject for PlaylistEntry {
 #[derive(Debug, PartialEq, Eq, Clone)]
 #[brw(little)]
 pub struct ColumnEntry {
-    // Possibly the primary key, though I don't know if that would
-    // make sense as I don't think there are references to these
-    // rows anywhere else. This could be a stable ID to identify
-    // a category by in hardware (instead of by name).
-    id: u16,
-    // Maybe a bitfield containing infos on sort order and which
-    // columns are displayed.
-    unknown0: u16,
+    /// Possibly the primary key, though I don't know if that would
+    /// make sense as I don't think there are references to these
+    /// rows anywhere else. This could be a stable ID to identify
+    /// a category by in hardware (instead of by name).
+    pub id: u16,
+    /// Maybe a bitfield containing infos on sort order and which
+    /// columns are displayed.
+    pub unknown0: u16,
     /// TODO Contained string is prefixed by the "interlinear annotation"
     /// characters "\u{fffa}" and postfixed with "\u{fffb}" for some reason?!
     /// Contained strings are actually `DeviceSQLString::LongBody` even though
@@ -1729,51 +1776,51 @@ impl PageHeapObject for ColumnEntry {
     }
 }
 
-#[derive(Debug, PartialEq, Clone, Eq)]
+#[derive(Debug, PartialEq, Clone, Eq, Default)]
 /// String fields stored via the offset table in Track rows
 pub struct TrackStrings {
     /// International Standard Recording Code (ISRC), in mangled format.
-    isrc: DeviceSQLString,
+    pub isrc: DeviceSQLString,
     /// Lyricist of the track.
-    lyricist: DeviceSQLString,
+    pub lyricist: DeviceSQLString,
     /// Unknown string field containing a number.
     /// Appears to increment when the track is exported or modified in Rekordbox.
-    unknown_string2: DeviceSQLString,
+    pub unknown_string2: DeviceSQLString,
     /// Unknown string field containing a number.
-    unknown_string3: DeviceSQLString,
+    pub unknown_string3: DeviceSQLString,
     /// Unknown string field.
-    unknown_string4: DeviceSQLString,
+    pub unknown_string4: DeviceSQLString,
     /// Track "message", a field in the Rekordbox UI.
-    message: DeviceSQLString,
+    pub message: DeviceSQLString,
     /// "Publish track information" in Rekordbox, value is either "ON" or empty string.
     /// Appears related to the Stagehand product to control DJ equipment remotely.
-    publish_track_information: DeviceSQLString,
+    pub publish_track_information: DeviceSQLString,
     /// Determines if hotcues should be autoloaded. Value is either "ON" or empty string.
-    autoload_hotcues: DeviceSQLString,
+    pub autoload_hotcues: DeviceSQLString,
     /// Unknown string field (usually empty).
-    unknown_string5: DeviceSQLString,
+    pub unknown_string5: DeviceSQLString,
     /// Unknown string field (usually empty).
-    unknown_string6: DeviceSQLString,
+    pub unknown_string6: DeviceSQLString,
     /// Date when the track was added to the Rekordbox collection (YYYY-MM-DD).
-    date_added: DeviceSQLString,
+    pub date_added: DeviceSQLString,
     /// Date when the track was released (YYYY-MM-DD).
-    release_date: DeviceSQLString,
+    pub release_date: DeviceSQLString,
     /// Name of the remix (if any).
-    mix_name: DeviceSQLString,
+    pub mix_name: DeviceSQLString,
     /// Unknown string field (usually empty).
-    unknown_string7: DeviceSQLString,
+    pub unknown_string7: DeviceSQLString,
     /// File path of the track analysis file.
-    analyze_path: DeviceSQLString,
+    pub analyze_path: DeviceSQLString,
     /// Date when the track analysis was performed (YYYY-MM-DD).
-    analyze_date: DeviceSQLString,
+    pub analyze_date: DeviceSQLString,
     /// Track comment.
-    comment: DeviceSQLString,
+    pub comment: DeviceSQLString,
     /// Track title.
     pub title: DeviceSQLString,
     /// Unknown string field (usually empty).
-    unknown_string8: DeviceSQLString,
+    pub unknown_string8: DeviceSQLString,
     /// Name of the file.
-    filename: DeviceSQLString,
+    pub filename: DeviceSQLString,
     /// Path of the file.
     pub file_path: DeviceSQLString,
 }
@@ -1842,69 +1889,69 @@ impl OffsetArrayItems<21> for TrackStrings {
 #[brw(little)]
 pub struct Track {
     /// Unknown field, usually `24 00`.
-    subtype: Subtype,
+    pub subtype: Subtype,
     /// Unknown field, called `index_shift` by [@flesniak](https://github.com/flesniak).
     /// Appears to always be 0x20 * row index.
-    index_shift: u16,
+    pub index_shift: u16,
     /// Unknown field, called `bitmask` by [@flesniak](https://github.com/flesniak).
     /// Appears to always be 0x000c0700.
-    bitmask: u32,
+    pub bitmask: u32,
     /// Sample Rate in Hz.
-    sample_rate: u32,
+    pub sample_rate: u32,
     /// Composer of this track as artist row ID (non-zero if set).
-    composer_id: ArtistId,
+    pub composer_id: ArtistId,
     /// File size in bytes.
-    file_size: u32,
+    pub file_size: u32,
     /// Unknown field; observed values are effectively random.
-    unknown2: u32,
+    pub unknown2: u32,
     /// Unknown field; observed values: 19048, 64128, 31844.
     /// Appears to be the same for all tracks in a given DB.
-    unknown3: u16,
+    pub unknown3: u16,
     /// Unknown field; observed values: 30967, 1511, 9043.
     /// Appears to be the same for all tracks in a given DB.
-    unknown4: u16,
+    pub unknown4: u16,
     /// Artwork row ID for the cover art (non-zero if set),
-    artwork_id: ArtworkId,
+    pub artwork_id: ArtworkId,
     /// Key row ID for the cover art (non-zero if set).
-    key_id: KeyId,
+    pub key_id: KeyId,
     /// Artist row ID of the original performer (non-zero if set).
-    orig_artist_id: ArtistId,
+    pub orig_artist_id: ArtistId,
     /// Label row ID of the original performer (non-zero if set).
-    label_id: LabelId,
+    pub label_id: LabelId,
     /// Artist row ID of the remixer (non-zero if set).
-    remixer_id: ArtistId,
+    pub remixer_id: ArtistId,
     /// Bitrate of the track.
-    bitrate: u32,
+    pub bitrate: u32,
     /// Track number of the track.
-    track_number: u32,
+    pub track_number: u32,
     /// Track tempo in centi-BPM (= 1/100 BPM).
-    tempo: u32,
+    pub tempo: u32,
     /// Genre row ID for this track (non-zero if set).
-    genre_id: GenreId,
+    pub genre_id: GenreId,
     /// Album row ID for this track (non-zero if set).
-    album_id: AlbumId,
+    pub album_id: AlbumId,
     /// Artist row ID for this track (non-zero if set).
     pub artist_id: ArtistId,
     /// Row ID of this track (non-zero if set).
     pub id: TrackId,
     /// Disc number of this track (non-zero if set).
-    disc_number: u16,
+    pub disc_number: u16,
     /// Number of times this track was played.
-    play_count: u16,
+    pub play_count: u16,
     /// Year this track was released.
-    year: u16,
+    pub year: u16,
     /// Bits per sample of the track aduio file.
-    sample_depth: u16,
+    pub sample_depth: u16,
     /// Playback duration of this track in seconds (at normal speed).
-    duration: u16,
+    pub duration: u16,
     /// Unknown field, apparently always "0x29".
-    unknown5: u16,
+    pub unknown5: u16,
     /// Color row ID for this track (non-zero if set).
-    color: ColorIndex,
+    pub color: ColorIndex,
     /// User rating of this track (0 to 5 starts).
     pub rating: u8,
     /// Format of the file.
-    file_type: FileType,
+    pub file_type: FileType,
     /// offsets (strings) at row end
     #[brw(args(0x5C, subtype.get_offset_size(), ()))]
     pub offsets: OffsetArrayContainer<TrackStrings, 21>,
@@ -1966,6 +2013,199 @@ impl PageHeapObject for Track {
         ]
         .iter()
         .sum()
+    }
+}
+
+impl Default for Track {
+    fn default() -> Self {
+        Self {
+            subtype: Subtype(0x24),
+            index_shift: 0,
+            bitmask: 0x000c_0700,
+            sample_rate: 0,
+            composer_id: ArtistId(0),
+            file_size: 0,
+            unknown2: 0,
+            unknown3: 0,
+            unknown4: 0,
+            artwork_id: ArtworkId(0),
+            key_id: KeyId(0),
+            orig_artist_id: ArtistId(0),
+            label_id: LabelId(0),
+            remixer_id: ArtistId(0),
+            bitrate: 0,
+            track_number: 0,
+            tempo: 0,
+            genre_id: GenreId(0),
+            album_id: AlbumId(0),
+            artist_id: ArtistId(0),
+            id: TrackId(0),
+            disc_number: 0,
+            play_count: 0,
+            year: 0,
+            sample_depth: 0,
+            duration: 0,
+            unknown5: 0x29,
+            color: ColorIndex::None,
+            rating: 0,
+            file_type: FileType::Unknown,
+            offsets: OffsetArrayContainer::default(),
+        }
+    }
+}
+
+/// Builder for constructing [`Track`] instances.
+#[derive(Debug, Default)]
+pub struct TrackBuilder {
+    track: Track,
+}
+
+impl Track {
+    /// Returns a new [`TrackBuilder`] for constructing a `Track`.
+    #[must_use]
+    pub fn builder() -> TrackBuilder {
+        TrackBuilder::default()
+    }
+}
+
+impl TrackBuilder {
+    /// Set the track ID.
+    #[must_use]
+    pub fn id(mut self, id: u32) -> Self {
+        self.track.id = TrackId(id);
+        self
+    }
+
+    /// Set the track title.
+    #[must_use]
+    pub fn title(mut self, title: DeviceSQLString) -> Self {
+        self.track.offsets.inner.title = title;
+        self
+    }
+
+    /// Set the file path.
+    #[must_use]
+    pub fn file_path(mut self, path: DeviceSQLString) -> Self {
+        self.track.offsets.inner.file_path = path;
+        self
+    }
+
+    /// Set the filename.
+    #[must_use]
+    pub fn filename(mut self, name: DeviceSQLString) -> Self {
+        self.track.offsets.inner.filename = name;
+        self
+    }
+
+    /// Set the artist ID.
+    #[must_use]
+    pub fn artist_id(mut self, id: u32) -> Self {
+        self.track.artist_id = ArtistId(id);
+        self
+    }
+
+    /// Set the sample rate in Hz.
+    #[must_use]
+    pub fn sample_rate(mut self, rate: u32) -> Self {
+        self.track.sample_rate = rate;
+        self
+    }
+
+    /// Set the bitrate.
+    #[must_use]
+    pub fn bitrate(mut self, bitrate: u32) -> Self {
+        self.track.bitrate = bitrate;
+        self
+    }
+
+    /// Set the duration in seconds.
+    #[must_use]
+    pub fn duration(mut self, duration: u16) -> Self {
+        self.track.duration = duration;
+        self
+    }
+
+    /// Set the file size in bytes.
+    #[must_use]
+    pub fn file_size(mut self, size: u32) -> Self {
+        self.track.file_size = size;
+        self
+    }
+
+    /// Set the file type.
+    #[must_use]
+    pub fn file_type(mut self, file_type: FileType) -> Self {
+        self.track.file_type = file_type;
+        self
+    }
+
+    /// Set the album ID.
+    #[must_use]
+    pub fn album_id(mut self, id: u32) -> Self {
+        self.track.album_id = AlbumId(id);
+        self
+    }
+
+    /// Set the genre ID.
+    #[must_use]
+    pub fn genre_id(mut self, id: u32) -> Self {
+        self.track.genre_id = GenreId(id);
+        self
+    }
+
+    /// Set the track tempo in centi-BPM (1/100 BPM).
+    #[must_use]
+    pub fn tempo(mut self, tempo: u32) -> Self {
+        self.track.tempo = tempo;
+        self
+    }
+
+    /// Set the track number.
+    #[must_use]
+    pub fn track_number(mut self, num: u32) -> Self {
+        self.track.track_number = num;
+        self
+    }
+
+    /// Set the year.
+    #[must_use]
+    pub fn year(mut self, year: u16) -> Self {
+        self.track.year = year;
+        self
+    }
+
+    /// Set the sample depth (bits per sample).
+    #[must_use]
+    pub fn sample_depth(mut self, depth: u16) -> Self {
+        self.track.sample_depth = depth;
+        self
+    }
+
+    /// Set the autoload hotcues string (typically "ON" or empty).
+    #[must_use]
+    pub fn autoload_hotcues(mut self, value: DeviceSQLString) -> Self {
+        self.track.offsets.inner.autoload_hotcues = value;
+        self
+    }
+
+    /// Set the date added string (YYYY-MM-DD format).
+    #[must_use]
+    pub fn date_added(mut self, date: DeviceSQLString) -> Self {
+        self.track.offsets.inner.date_added = date;
+        self
+    }
+
+    /// Set the analyze date string (YYYY-MM-DD format).
+    #[must_use]
+    pub fn analyze_date(mut self, date: DeviceSQLString) -> Self {
+        self.track.offsets.inner.analyze_date = date;
+        self
+    }
+
+    /// Consume the builder and return the constructed [`Track`].
+    #[must_use]
+    pub fn build(self) -> Track {
+        self.track
     }
 }
 
@@ -2218,6 +2458,46 @@ impl Row {
                 ExtRow::Tag(_) => ExtPageType::Tag,
                 ExtRow::TrackTag(_) => ExtPageType::TrackTag,
             }),
+        }
+    }
+}
+
+impl Row {
+    /// Sets `index_shift` on row types that have the field.
+    ///
+    /// For row types without `index_shift`, this is a no-op.
+    pub fn set_index_shift(&mut self, value: u16) {
+        match self {
+            Row::Plain(plain) => match plain {
+                PlainRow::Album(row) => row.index_shift = value,
+                PlainRow::Artist(row) => row.index_shift = value,
+                PlainRow::Track(row) => row.index_shift = value,
+                PlainRow::History(row) => row.index_shift = value,
+                _ => {}
+            },
+            Row::Ext(ext) => {
+                if let ExtRow::Tag(row) = ext {
+                    row.index_shift = value;
+                }
+            }
+        }
+    }
+
+    /// Returns the current `index_shift` value, or `None` for row types without the field.
+    #[must_use]
+    pub fn index_shift(&self) -> Option<u16> {
+        match self {
+            Row::Plain(plain) => match plain {
+                PlainRow::Album(row) => Some(row.index_shift),
+                PlainRow::Artist(row) => Some(row.index_shift),
+                PlainRow::Track(row) => Some(row.index_shift),
+                PlainRow::History(row) => Some(row.index_shift),
+                _ => None,
+            },
+            Row::Ext(ext) => match ext {
+                ExtRow::Tag(row) => Some(row.index_shift),
+                _ => None,
+            },
         }
     }
 }
