@@ -8,6 +8,94 @@
 use super::*;
 
 #[test]
+fn new_data_page() {
+    let page_size = 4096;
+    let page_index = PageIndex::try_from(12).unwrap();
+    let next_page = PageIndex::try_from(51).unwrap();
+
+    let page = Page::new_data(
+        page_size,
+        page_index.clone(),
+        PageType::Plain(PlainPageType::Keys),
+        next_page.clone(),
+    );
+
+    assert_eq!(page.header.page_index, page_index);
+    assert_eq!(page.header.next_page, next_page);
+    assert_eq!(page.header.page_type, PageType::Plain(PlainPageType::Keys));
+    assert_eq!(page.header.unknown1, 0);
+    assert_eq!(page.header.unknown2, 0);
+    assert_eq!(page.header.packed_row_counts, PackedRowCounts::new());
+    assert_eq!(page.header.page_flags, PageFlags::new_data_page());
+    assert_eq!(
+        page.header.free_size,
+        (page_size - PageHeader::BINARY_SIZE - DataPageHeader::BINARY_SIZE) as u16
+    );
+    assert_eq!(page.header.used_size, 0);
+
+    match page.content {
+        PageContent::Data(dpc) => {
+            assert_eq!(
+                dpc.header,
+                DataPageHeader {
+                    unknown5: 0,
+                    unknown_not_num_rows_large: 0,
+                    unknown6: 0,
+                    unknown7: 0,
+                }
+            );
+            assert!(dpc.row_groups.is_empty());
+            assert!(dpc.rows.is_empty());
+        }
+        _ => panic!("expected data page"),
+    }
+}
+
+#[test]
+fn new_index_page() {
+    let page_index = PageIndex::try_from(1).unwrap();
+    let next_page = PageIndex::try_from(2).unwrap();
+
+    let page = Page::new_index(
+        page_index.clone(),
+        PageType::Plain(PlainPageType::Tracks),
+        next_page.clone(),
+    );
+
+    assert_eq!(page.header.page_index, page_index);
+    assert_eq!(page.header.next_page, next_page);
+    assert_eq!(
+        page.header.page_type,
+        PageType::Plain(PlainPageType::Tracks)
+    );
+    assert_eq!(page.header.unknown1, 0);
+    assert_eq!(page.header.unknown2, 0);
+    assert_eq!(page.header.packed_row_counts, PackedRowCounts::new());
+    assert_eq!(page.header.page_flags, PageFlags::new_index_page());
+    assert_eq!(page.header.free_size, 0);
+    assert_eq!(page.header.used_size, 0);
+
+    match page.content {
+        PageContent::Index(ipc) => {
+            assert_eq!(
+                ipc.header,
+                IndexPageHeader {
+                    unknown_a: 0,
+                    unknown_b: 0,
+                    next_offset: 0,
+                    page_index: PageIndex::try_from(1).unwrap(),
+                    next_page: PageIndex::try_from(2).unwrap(),
+                    num_entries: 0,
+                    first_empty: 0,
+                }
+            );
+            assert!(ipc.entries.is_empty());
+        }
+        _ => panic!("expected index page"),
+    }
+}
+
+#[test]
 fn allocate_row_empty_page() {
     let page = {
         let row_groups = vec![];
