@@ -67,6 +67,11 @@ fn test_pdb_row_count_historyentries() {
 }
 
 #[test]
+fn test_pdb_row_count_history() {
+    assert_pdb_row_count::<History>(1);
+}
+
+#[test]
 fn test_pdb_row_count_keys() {
     assert_pdb_row_count::<Key>(67);
 }
