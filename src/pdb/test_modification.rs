@@ -15,9 +15,9 @@ fn new_data_page() {
 
     let page = Page::new_data(
         page_size,
-        page_index.clone(),
+        page_index,
         PageType::Plain(PlainPageType::Keys),
-        next_page.clone(),
+        next_page,
     );
 
     assert_eq!(page.header.page_index, page_index);
@@ -57,9 +57,9 @@ fn new_index_page() {
     let next_page = PageIndex::try_from(2).unwrap();
 
     let page = Page::new_index(
-        page_index.clone(),
+        page_index,
         PageType::Plain(PlainPageType::Tracks),
-        next_page.clone(),
+        next_page,
     );
 
     assert_eq!(page.header.page_index, page_index);

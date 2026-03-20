@@ -37,7 +37,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::pdb::ext::{ExtPageType, ExtRow};
-use crate::pdb::offset_array::{OffsetSize, OffsetArray};
+use crate::pdb::offset_array::{OffsetArray, OffsetSize};
 use crate::pdb::string::DeviceSQLString;
 use crate::util::{parse_at_offsets, write_at_offsets, ColorIndex, FileType, TableIndex};
 use binrw::{binrw, BinRead, BinResult, BinWrite, Endian};
@@ -611,10 +611,7 @@ impl Page {
     /// Creates a new empty index page.
     #[must_use]
     pub fn new_index(page_index: PageIndex, page_type: PageType, next_page: PageIndex) -> Self {
-        let content = PageContent::Index(IndexPageContent::empty(
-            page_index.clone(),
-            next_page.clone(),
-        ));
+        let content = PageContent::Index(IndexPageContent::empty(page_index, next_page));
         let header = PageHeader {
             page_index,
             page_type,
@@ -2091,6 +2088,33 @@ pub enum Row {
 }
 
 impl Row {
+    /// Returns the page type this row belongs to.
+    #[must_use]
+    pub fn page_type(&self) -> PageType {
+        match self {
+            Row::Plain(plain_row) => PageType::Plain(match plain_row {
+                PlainRow::Album(_) => PlainPageType::Albums,
+                PlainRow::Artist(_) => PlainPageType::Artists,
+                PlainRow::Artwork(_) => PlainPageType::Artwork,
+                PlainRow::Color(_) => PlainPageType::Colors,
+                PlainRow::Genre(_) => PlainPageType::Genres,
+                PlainRow::HistoryPlaylist(_) => PlainPageType::HistoryPlaylists,
+                PlainRow::HistoryEntry(_) => PlainPageType::HistoryEntries,
+                PlainRow::Key(_) => PlainPageType::Keys,
+                PlainRow::Label(_) => PlainPageType::Labels,
+                PlainRow::PlaylistTreeNode(_) => PlainPageType::PlaylistTree,
+                PlainRow::PlaylistEntry(_) => PlainPageType::PlaylistEntries,
+                PlainRow::ColumnEntry(_) => PlainPageType::Columns,
+                PlainRow::Menu(_) => PlainPageType::Menu,
+                PlainRow::Track(_) => PlainPageType::Tracks,
+            }),
+            Row::Ext(ext_row) => PageType::Ext(match ext_row {
+                ExtRow::Tag(_) => ExtPageType::Tag,
+                ExtRow::TrackTag(_) => ExtPageType::TrackTag,
+            }),
+        }
+    }
+
     /// Attempt to convert this row into a reference to the given variant type.
     #[must_use]
     pub fn as_variant<T: RowVariant>(&self) -> Option<&T> {
