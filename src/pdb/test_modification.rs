@@ -80,13 +80,13 @@ fn new_index_page() {
             assert_eq!(
                 ipc.header,
                 IndexPageHeader {
-                    unknown_a: 0,
-                    unknown_b: 0,
+                    unknown_a: 8191,
+                    unknown_b: 8191,
                     next_offset: 0,
                     page_index: PageIndex::try_from(1).unwrap(),
                     next_page: PageIndex::try_from(2).unwrap(),
                     num_entries: 0,
-                    first_empty: 0,
+                    first_empty: 8191,
                 }
             );
             assert!(ipc.entries.is_empty());
