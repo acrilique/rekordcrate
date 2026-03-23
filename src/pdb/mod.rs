@@ -40,7 +40,9 @@ use std::fmt;
 use crate::pdb::ext::{ExtPageType, ExtRow};
 use crate::pdb::offset_array::{OffsetArray, OffsetSize};
 use crate::pdb::string::DeviceSQLString;
-use crate::util::{parse_at_offsets, write_at_offsets, ColorIndex, FileType, TableIndex};
+use crate::util::{
+    parse_at_offsets, write_at_offsets, ColorIndex, FileType, MaybeCalculated, TableIndex,
+};
 use binrw::{binrw, BinRead, BinResult, BinWrite, Endian};
 use std::io::{Read, Seek, SeekFrom, Write};
 use thiserror::Error;
@@ -1101,6 +1103,99 @@ pub struct Album {
     pub offsets: OffsetArrayContainer<TrailingName, 1>,
 }
 
+impl Album {
+    /// Create a builder for constructing an [`Album`] row.
+    #[must_use]
+    pub fn builder() -> AlbumBuilder {
+        AlbumBuilder::default()
+    }
+}
+
+/// Builder for [`Album`] rows.
+#[derive(Debug, Clone)]
+pub struct AlbumBuilder {
+    id: AlbumId,
+    artist_id: ArtistId,
+    index_shift: u16,
+    unknown2: u32,
+    unknown3: u32,
+    name: DeviceSQLString,
+}
+
+impl Default for AlbumBuilder {
+    fn default() -> Self {
+        Self {
+            id: AlbumId(0),
+            artist_id: ArtistId(0),
+            index_shift: 0,
+            unknown2: 0,
+            unknown3: 0,
+            name: DeviceSQLString::empty(),
+        }
+    }
+}
+
+impl AlbumBuilder {
+    /// Set the album row ID.
+    #[must_use]
+    pub fn id(mut self, id: u32) -> Self {
+        self.id = AlbumId(id);
+        self
+    }
+
+    /// Set the associated artist row ID.
+    #[must_use]
+    pub fn artist_id(mut self, artist_id: u32) -> Self {
+        self.artist_id = ArtistId(artist_id);
+        self
+    }
+
+    /// Set the row `index_shift` field.
+    #[must_use]
+    pub fn index_shift(mut self, index_shift: u16) -> Self {
+        self.index_shift = index_shift;
+        self
+    }
+
+    /// Set the undocumented `unknown2` field.
+    #[must_use]
+    pub fn unknown2(mut self, unknown2: u32) -> Self {
+        self.unknown2 = unknown2;
+        self
+    }
+
+    /// Set the undocumented `unknown3` field.
+    #[must_use]
+    pub fn unknown3(mut self, unknown3: u32) -> Self {
+        self.unknown3 = unknown3;
+        self
+    }
+
+    /// Set the album name.
+    #[must_use]
+    pub fn name(mut self, name: DeviceSQLString) -> Self {
+        self.name = name;
+        self
+    }
+
+    /// Build the [`Album`] row.
+    #[must_use]
+    pub fn build(self) -> Album {
+        Album {
+            subtype: Subtype(0x80),
+            index_shift: self.index_shift,
+            unknown2: self.unknown2,
+            artist_id: self.artist_id,
+            id: self.id,
+            unknown3: self.unknown3,
+            offsets: OffsetArrayContainer {
+                offsets: MaybeCalculated::Calculated,
+                inner: TrailingName { name: self.name },
+            },
+        }
+    }
+}
+
 impl PageHeapObject for Album {
     type Args<'a> = ();
     fn heap_bytes_required(&self, _: ()) -> u16 {
@@ -1153,6 +1248,69 @@ pub struct Artist {
     pub offsets: OffsetArrayContainer<TrailingName, 1>,
 }
 
+impl Artist {
+    /// Create a builder for constructing an [`Artist`] row.
+    #[must_use]
+    pub fn builder() -> ArtistBuilder {
+        ArtistBuilder::default()
+    }
+}
+
+/// Builder for [`Artist`] rows.
+#[derive(Debug, Clone)]
+pub struct ArtistBuilder {
+    id: ArtistId,
+    index_shift: u16,
+    name: DeviceSQLString,
+}
+
+impl Default for ArtistBuilder {
+    fn default() -> Self {
+        Self {
+            id: ArtistId(0),
+            index_shift: 0,
+            name: DeviceSQLString::empty(),
+        }
+    }
+}
+
+impl ArtistBuilder {
+    /// Set the artist row ID.
+    #[must_use]
+    pub fn id(mut self, id: u32) -> Self {
+        self.id = ArtistId(id);
+        self
+    }
+
+    /// Set the row `index_shift` field.
+    #[must_use]
+    pub fn index_shift(mut self, index_shift: u16) -> Self {
+        self.index_shift = index_shift;
+        self
+    }
+
+    /// Set the artist name.
+    #[must_use]
+    pub fn name(mut self, name: DeviceSQLString) -> Self {
+        self.name = name;
+        self
+    }
+
+    /// Build the [`Artist`] row.
+    #[must_use]
+    pub fn build(self) -> Artist {
+        Artist {
+            subtype: Subtype(0x60),
+            index_shift: self.index_shift,
+            id: self.id,
+            offsets: OffsetArrayContainer {
+                offsets: MaybeCalculated::Calculated,
+                inner: TrailingName { name: self.name },
+            },
+        }
+    }
+}
+
 impl PageHeapObject for Artist {
     type Args<'a> = ();
     fn heap_bytes_required(&self, _: ()) -> u16 {
@@ -1194,6 +1352,55 @@ pub struct Artwork {
     id: ArtworkId,
     /// Path to the album art file.
     path: DeviceSQLString,
+}
+
+impl Artwork {
+    /// Create a builder for constructing an [`Artwork`] row.
+    #[must_use]
+    pub fn builder() -> ArtworkBuilder {
+        ArtworkBuilder::default()
+    }
+}
+
+/// Builder for [`Artwork`] rows.
+#[derive(Debug, Clone)]
+pub struct ArtworkBuilder {
+    id: ArtworkId,
+    path: DeviceSQLString,
+}
+
+impl Default for ArtworkBuilder {
+    fn default() -> Self {
+        Self {
+            id: ArtworkId(0),
+            path: DeviceSQLString::empty(),
+        }
+    }
+}
+
+impl ArtworkBuilder {
+    /// Set the artwork row ID.
+    #[must_use]
+    pub fn id(mut self, id: u32) -> Self {
+        self.id = ArtworkId(id);
+        self
+    }
+
+    /// Set the artwork file path.
+    #[must_use]
+    pub fn path(mut self, path: DeviceSQLString) -> Self {
+        self.path = path;
+        self
+    }
+
+    /// Build the [`Artwork`] row.
+    #[must_use]
+    pub fn build(self) -> Artwork {
+        Artwork {
+            id: self.id,
+            path: self.path,
+        }
+    }
 }
 
 impl PageHeapObject for Artwork {
@@ -1283,6 +1490,55 @@ pub struct Genre {
     id: GenreId,
     /// Name of the genre.
     name: DeviceSQLString,
+}
+
+impl Genre {
+    /// Create a builder for constructing a [`Genre`] row.
+    #[must_use]
+    pub fn builder() -> GenreBuilder {
+        GenreBuilder::default()
+    }
+}
+
+/// Builder for [`Genre`] rows.
+#[derive(Debug, Clone)]
+pub struct GenreBuilder {
+    id: GenreId,
+    name: DeviceSQLString,
+}
+
+impl Default for GenreBuilder {
+    fn default() -> Self {
+        Self {
+            id: GenreId(0),
+            name: DeviceSQLString::empty(),
+        }
+    }
+}
+
+impl GenreBuilder {
+    /// Set the genre row ID.
+    #[must_use]
+    pub fn id(mut self, id: u32) -> Self {
+        self.id = GenreId(id);
+        self
+    }
+
+    /// Set the genre name.
+    #[must_use]
+    pub fn name(mut self, name: DeviceSQLString) -> Self {
+        self.name = name;
+        self
+    }
+
+    /// Build the [`Genre`] row.
+    #[must_use]
+    pub fn build(self) -> Genre {
+        Genre {
+            id: self.id,
+            name: self.name,
+        }
+    }
 }
 
 impl PageHeapObject for Genre {
@@ -1407,22 +1663,22 @@ impl RowVariant for HistoryEntry {
 #[brw(little)]
 pub struct History {
     /// Subtype field, in this case usually `80 02` (hex) or `640` (decimal).
-    subtype: Subtype,
+    pub subtype: Subtype,
     /// Unknown field. I'm assuming this is the `index_shift` found in other row types.
-    index_shift: u16,
+    pub index_shift: u16,
     /// Tracks present in the database after this sync event.
-    num_tracks: u32,
+    pub num_tracks: u32,
     // Magic value, always zero.
     #[brw(magic = 0u32)]
     /// Sync date, e.g. "2022-02-02".
-    date: DeviceSQLString,
+    pub date: DeviceSQLString,
     // Magic value, always `7705` -> `0x1E19`.
     #[brw(magic = 0x1E19u16)]
     /// Format/protocol version string. In all known exports this is the string "1000".
     // We could make this magic, but for now this seems fine.
-    version: DeviceSQLString,
+    pub version: DeviceSQLString,
     /// Device or backup label. Can be empty.
-    label: DeviceSQLString,
+    pub label: DeviceSQLString,
 }
 
 impl PageHeapObject for History {
@@ -1473,6 +1729,66 @@ pub struct Key {
     name: DeviceSQLString,
 }
 
+impl Key {
+    /// Create a builder for constructing a [`Key`] row.
+    #[must_use]
+    pub fn builder() -> KeyBuilder {
+        KeyBuilder::default()
+    }
+}
+
+/// Builder for [`Key`] rows.
+#[derive(Debug, Clone)]
+pub struct KeyBuilder {
+    id: KeyId,
+    id2: u32,
+    name: DeviceSQLString,
+}
+
+impl Default for KeyBuilder {
+    fn default() -> Self {
+        Self {
+            id: KeyId(0),
+            id2: 0,
+            name: DeviceSQLString::empty(),
+        }
+    }
+}
+
+impl KeyBuilder {
+    /// Set the key row ID.
+    #[must_use]
+    pub fn id(mut self, id: u32) -> Self {
+        self.id = KeyId(id);
+        self.id2 = id;
+        self
+    }
+
+    /// Set the duplicated `id2` field.
+    #[must_use]
+    pub fn id2(mut self, id2: u32) -> Self {
+        self.id2 = id2;
+        self
+    }
+
+    /// Set the key name.
+    #[must_use]
+    pub fn name(mut self, name: DeviceSQLString) -> Self {
+        self.name = name;
+        self
+    }
+
+    /// Build the [`Key`] row.
+    #[must_use]
+    pub fn build(self) -> Key {
+        Key {
+            id: self.id,
+            id2: self.id2,
+            name: self.name,
+        }
+    }
+}
+
 impl PageHeapObject for Key {
     type Args<'a> = ();
     fn heap_bytes_required(&self, _: ()) -> u16 {
@@ -1512,6 +1828,55 @@ pub struct Label {
     id: LabelId,
     /// Name of the record label.
     name: DeviceSQLString,
+}
+
+impl Label {
+    /// Create a builder for constructing a [`Label`] row.
+    #[must_use]
+    pub fn builder() -> LabelBuilder {
+        LabelBuilder::default()
+    }
+}
+
+/// Builder for [`Label`] rows.
+#[derive(Debug, Clone)]
+pub struct LabelBuilder {
+    id: LabelId,
+    name: DeviceSQLString,
+}
+
+impl Default for LabelBuilder {
+    fn default() -> Self {
+        Self {
+            id: LabelId(0),
+            name: DeviceSQLString::empty(),
+        }
+    }
+}
+
+impl LabelBuilder {
+    /// Set the label row ID.
+    #[must_use]
+    pub fn id(mut self, id: u32) -> Self {
+        self.id = LabelId(id);
+        self
+    }
+
+    /// Set the label name.
+    #[must_use]
+    pub fn name(mut self, name: DeviceSQLString) -> Self {
+        self.name = name;
+        self
+    }
+
+    /// Build the [`Label`] row.
+    #[must_use]
+    pub fn build(self) -> Label {
+        Label {
+            id: self.id,
+            name: self.name,
+        }
+    }
 }
 
 impl PageHeapObject for Label {
@@ -1881,6 +2246,198 @@ pub struct Track {
     /// offsets (strings) at row end
     #[brw(args(0x5C, subtype.get_offset_size(), ()))]
     pub offsets: OffsetArrayContainer<TrackStrings, 21>,
+}
+
+impl Track {
+    /// Create a builder for constructing a [`Track`] row.
+    #[must_use]
+    pub fn builder() -> TrackBuilder {
+        TrackBuilder::default()
+    }
+}
+
+/// Builder for [`Track`] rows.
+#[derive(Debug, Clone)]
+pub struct TrackBuilder {
+    track: Track,
+}
+
+impl Default for TrackBuilder {
+    fn default() -> Self {
+        Self {
+            track: Track {
+                subtype: Subtype(0x24),
+                index_shift: 0,
+                bitmask: 788_224,
+                sample_rate: 44_100,
+                composer_id: ArtistId(0),
+                file_size: 0,
+                unknown2: 0,
+                unknown3: 0,
+                unknown4: 0,
+                artwork_id: ArtworkId(0),
+                key_id: KeyId(0),
+                orig_artist_id: ArtistId(0),
+                label_id: LabelId(0),
+                remixer_id: ArtistId(0),
+                bitrate: 0,
+                track_number: 0,
+                tempo: 0,
+                genre_id: GenreId(0),
+                album_id: AlbumId(0),
+                artist_id: ArtistId(0),
+                id: TrackId(0),
+                disc_number: 0,
+                play_count: 0,
+                year: 0,
+                sample_depth: 16,
+                duration: 0,
+                unknown5: 41,
+                color: ColorIndex::None,
+                rating: 0,
+                file_type: FileType::Unknown,
+                offsets: OffsetArrayContainer {
+                    offsets: MaybeCalculated::Calculated,
+                    inner: TrackStrings {
+                        isrc: DeviceSQLString::empty(),
+                        lyricist: DeviceSQLString::empty(),
+                        unknown_string2: DeviceSQLString::new("1").unwrap(),
+                        unknown_string3: DeviceSQLString::new("1").unwrap(),
+                        unknown_string4: DeviceSQLString::empty(),
+                        message: DeviceSQLString::empty(),
+                        publish_track_information: DeviceSQLString::new("ON").unwrap(),
+                        autoload_hotcues: DeviceSQLString::empty(),
+                        unknown_string5: DeviceSQLString::empty(),
+                        unknown_string6: DeviceSQLString::empty(),
+                        date_added: DeviceSQLString::empty(),
+                        release_date: DeviceSQLString::empty(),
+                        mix_name: DeviceSQLString::empty(),
+                        unknown_string7: DeviceSQLString::empty(),
+                        analyze_path: DeviceSQLString::empty(),
+                        analyze_date: DeviceSQLString::empty(),
+                        comment: DeviceSQLString::empty(),
+                        title: DeviceSQLString::empty(),
+                        unknown_string8: DeviceSQLString::empty(),
+                        filename: DeviceSQLString::empty(),
+                        file_path: DeviceSQLString::empty(),
+                    },
+                },
+            },
+        }
+    }
+}
+
+impl TrackBuilder {
+    /// Set the track row ID.
+    #[must_use]
+    pub fn id(mut self, id: u32) -> Self {
+        self.track.id = TrackId(id);
+        self
+    }
+
+    /// Set the associated artist row ID.
+    #[must_use]
+    pub fn artist_id(mut self, artist_id: u32) -> Self {
+        self.track.artist_id = ArtistId(artist_id);
+        self
+    }
+
+    /// Set the associated album row ID.
+    #[must_use]
+    pub fn album_id(mut self, album_id: u32) -> Self {
+        self.track.album_id = AlbumId(album_id);
+        self
+    }
+
+    /// Set the title string.
+    #[must_use]
+    pub fn title(mut self, title: DeviceSQLString) -> Self {
+        self.track.offsets.inner.title = title;
+        self
+    }
+
+    /// Set the file name string.
+    #[must_use]
+    pub fn filename(mut self, filename: DeviceSQLString) -> Self {
+        self.track.offsets.inner.filename = filename;
+        self
+    }
+
+    /// Set the file path string.
+    #[must_use]
+    pub fn file_path(mut self, file_path: DeviceSQLString) -> Self {
+        self.track.offsets.inner.file_path = file_path;
+        self
+    }
+
+    /// Set the sample rate in Hz.
+    #[must_use]
+    pub fn sample_rate(mut self, sample_rate: u32) -> Self {
+        self.track.sample_rate = sample_rate;
+        self
+    }
+
+    /// Set bits per sample.
+    #[must_use]
+    pub fn sample_depth(mut self, sample_depth: u16) -> Self {
+        self.track.sample_depth = sample_depth;
+        self
+    }
+
+    /// Set bitrate.
+    #[must_use]
+    pub fn bitrate(mut self, bitrate: u32) -> Self {
+        self.track.bitrate = bitrate;
+        self
+    }
+
+    /// Set playback duration in seconds.
+    #[must_use]
+    pub fn duration(mut self, duration: u16) -> Self {
+        self.track.duration = duration;
+        self
+    }
+
+    /// Set file size in bytes.
+    #[must_use]
+    pub fn file_size(mut self, file_size: u32) -> Self {
+        self.track.file_size = file_size;
+        self
+    }
+
+    /// Set tempo in centi-BPM.
+    #[must_use]
+    pub fn tempo(mut self, tempo: u32) -> Self {
+        self.track.tempo = tempo;
+        self
+    }
+
+    /// Set file type.
+    #[must_use]
+    pub fn file_type(mut self, file_type: FileType) -> Self {
+        self.track.file_type = file_type;
+        self
+    }
+
+    /// Set autoload hotcues string.
+    #[must_use]
+    pub fn autoload_hotcues(mut self, autoload_hotcues: DeviceSQLString) -> Self {
+        self.track.offsets.inner.autoload_hotcues = autoload_hotcues;
+        self
+    }
+
+    /// Set date-added string (`YYYY-MM-DD`).
+    #[must_use]
+    pub fn date_added(mut self, date_added: DeviceSQLString) -> Self {
+        self.track.offsets.inner.date_added = date_added;
+        self
+    }
+
+    /// Build the [`Track`] row.
+    #[must_use]
+    pub fn build(self) -> Track {
+        self.track
+    }
 }
 
 impl PageHeapObject for Track {
