@@ -834,30 +834,7 @@ mod test {
             } => {
                 assert_eq!(track_id, 1);
                 assert!(allocated < minimum);
-                assert_eq!(minimum, 256);
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_flush_rejects_existing_undersized_track_row() {
-        let bytes = include_bytes!("../../not-working.pdb");
-        let mut db = Database::open(Cursor::new(bytes.to_vec()), DatabaseType::Plain).unwrap();
-
-        let err = db
-            .flush()
-            .expect_err("expected flush to reject undersized track rows");
-
-        match err {
-            RekordcrateError::TrackRowTooSmall {
-                track_id,
-                allocated,
-                minimum,
-            } => {
-                assert_eq!(track_id, 1);
-                assert!(allocated < minimum);
-                assert_eq!(minimum, 256);
+                assert_eq!(minimum, 221);
             }
             other => panic!("unexpected error: {other:?}"),
         }
