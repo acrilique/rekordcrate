@@ -2419,6 +2419,97 @@ impl TrackBuilder {
         self
     }
 
+    /// Set the associated genre row ID.
+    #[must_use]
+    pub fn genre_id(mut self, genre_id: u32) -> Self {
+        self.track.genre_id = GenreId(genre_id);
+        self
+    }
+
+    /// Set the associated key row ID.
+    #[must_use]
+    pub fn key_id(mut self, key_id: u32) -> Self {
+        self.track.key_id = KeyId(key_id);
+        self
+    }
+
+    /// Set the associated label row ID.
+    #[must_use]
+    pub fn label_id(mut self, label_id: u32) -> Self {
+        self.track.label_id = LabelId(label_id);
+        self
+    }
+
+    /// Set the composer artist row ID.
+    #[must_use]
+    pub fn composer_id(mut self, composer_id: u32) -> Self {
+        self.track.composer_id = ArtistId(composer_id);
+        self
+    }
+
+    /// Set the original artist row ID.
+    #[must_use]
+    pub fn orig_artist_id(mut self, orig_artist_id: u32) -> Self {
+        self.track.orig_artist_id = ArtistId(orig_artist_id);
+        self
+    }
+
+    /// Set the remixer artist row ID.
+    #[must_use]
+    pub fn remixer_id(mut self, remixer_id: u32) -> Self {
+        self.track.remixer_id = ArtistId(remixer_id);
+        self
+    }
+
+    /// Set the artwork row ID.
+    #[must_use]
+    pub fn artwork_id(mut self, artwork_id: u32) -> Self {
+        self.track.artwork_id = ArtworkId(artwork_id);
+        self
+    }
+
+    /// Set the track number.
+    #[must_use]
+    pub fn track_number(mut self, track_number: u32) -> Self {
+        self.track.track_number = track_number;
+        self
+    }
+
+    /// Set the disc number.
+    #[must_use]
+    pub fn disc_number(mut self, disc_number: u16) -> Self {
+        self.track.disc_number = disc_number;
+        self
+    }
+
+    /// Set the release year.
+    #[must_use]
+    pub fn year(mut self, year: u16) -> Self {
+        self.track.year = year;
+        self
+    }
+
+    /// Set the user rating (0–5).
+    #[must_use]
+    pub fn rating(mut self, rating: u8) -> Self {
+        self.track.rating = rating;
+        self
+    }
+
+    /// Set the color index.
+    #[must_use]
+    pub fn color(mut self, color: ColorIndex) -> Self {
+        self.track.color = color;
+        self
+    }
+
+    /// Set the play count.
+    #[must_use]
+    pub fn play_count(mut self, play_count: u16) -> Self {
+        self.track.play_count = play_count;
+        self
+    }
+
     /// Set autoload hotcues string.
     #[must_use]
     pub fn autoload_hotcues(mut self, autoload_hotcues: DeviceSQLString) -> Self {
@@ -2430,6 +2521,62 @@ impl TrackBuilder {
     #[must_use]
     pub fn date_added(mut self, date_added: DeviceSQLString) -> Self {
         self.track.offsets.inner.date_added = date_added;
+        self
+    }
+
+    /// Set the comment string.
+    #[must_use]
+    pub fn comment(mut self, comment: DeviceSQLString) -> Self {
+        self.track.offsets.inner.comment = comment;
+        self
+    }
+
+    /// Set the ISRC string.
+    #[must_use]
+    pub fn isrc(mut self, isrc: DeviceSQLString) -> Self {
+        self.track.offsets.inner.isrc = isrc;
+        self
+    }
+
+    /// Set the lyricist string.
+    #[must_use]
+    pub fn lyricist(mut self, lyricist: DeviceSQLString) -> Self {
+        self.track.offsets.inner.lyricist = lyricist;
+        self
+    }
+
+    /// Set the mix name string.
+    #[must_use]
+    pub fn mix_name(mut self, mix_name: DeviceSQLString) -> Self {
+        self.track.offsets.inner.mix_name = mix_name;
+        self
+    }
+
+    /// Set the release date string (`YYYY-MM-DD`).
+    #[must_use]
+    pub fn release_date(mut self, release_date: DeviceSQLString) -> Self {
+        self.track.offsets.inner.release_date = release_date;
+        self
+    }
+
+    /// Set the message/description string.
+    #[must_use]
+    pub fn message(mut self, message: DeviceSQLString) -> Self {
+        self.track.offsets.inner.message = message;
+        self
+    }
+
+    /// Set the analyze path string.
+    #[must_use]
+    pub fn analyze_path(mut self, analyze_path: DeviceSQLString) -> Self {
+        self.track.offsets.inner.analyze_path = analyze_path;
+        self
+    }
+
+    /// Set the analyze date string.
+    #[must_use]
+    pub fn analyze_date(mut self, analyze_date: DeviceSQLString) -> Self {
+        self.track.offsets.inner.analyze_date = analyze_date;
         self
     }
 
