@@ -45,6 +45,15 @@ fn main() {
     // Make cargo rerun the build script if the data directory changes.
     println!("cargo:rerun-if-changed=data");
 
+    // The `cpp` feature adds a cxx C++ FFI layer; build it only when requested.
+    #[cfg(feature = "cpp")]
+    {
+        cxx_build::bridge("src/cpp.rs")
+            .std("c++17")
+            .compile("rekordcrate_cpp");
+        println!("cargo:rerun-if-changed=src/cpp.rs");
+    }
+
     let out_dir = env::var("OUT_DIR").unwrap();
     let out_dir = Path::new(&out_dir);
     eprintln!("Writing tests to: {:?}", out_dir);

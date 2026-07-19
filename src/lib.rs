@@ -24,6 +24,8 @@
 #![cfg_attr(not(debug_assertions), deny(clippy::used_underscore_binding))]
 
 pub mod anlz;
+#[cfg(feature = "cpp")]
+pub mod cpp;
 pub mod device;
 pub mod pdb;
 pub mod setting;
