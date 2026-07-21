@@ -71,6 +71,10 @@ pub mod ffi {
         /// Device path stored verbatim in the `Artwork` row. Caller owns the
         /// files. Empty = no artwork.
         pub artwork_device_path: String,
+        #[cfg(feature = "analysis")]
+        /// Host path to the audio file. The writer decodes it and computes ANLZ
+        /// waveform columns itself. Empty = no ANLZ generation.
+        pub analysis_source: String,
         pub message: String,
         pub tempo: f32,
         pub bitrate: u32,
@@ -230,6 +234,8 @@ fn track_default() -> Track {
         artwork_source: d.artwork_source,
         #[cfg(not(feature = "artwork"))]
         artwork_device_path: d.artwork_device_path,
+        #[cfg(feature = "analysis")]
+        analysis_source: d.analysis_source,
         message: d.message,
         tempo: d.tempo,
         bitrate: d.bitrate,
@@ -443,6 +449,13 @@ impl From<FileType> for util::FileType {
 
 /// Copy the FFI-shaped `Track` into the crate's typed struct. Field-for-field;
 /// the artwork field name follows the `artwork` feature in both structs.
+///
+/// `analysis` is always `None`: the bridge intentionally does not mirror
+/// `AnlzInput` (11 fields of `crate::anlz` column types) across the boundary.
+/// Under the `analysis` feature, the writer instead computes columns from
+/// `analysis_source`. ponytail: ceiling — a C++ caller cannot supply
+/// pre-computed beats/cues/waveform columns. Upgrade path: mirror the
+/// `crate::anlz` section types as shared enums if a caller ever needs that.
 fn track_to_native(t: &Track) -> crate::Track {
     crate::Track {
         title: t.title.clone(),
@@ -466,6 +479,9 @@ fn track_to_native(t: &Track) -> crate::Track {
         artwork_source: t.artwork_source.clone(),
         #[cfg(not(feature = "artwork"))]
         artwork_device_path: t.artwork_device_path.clone(),
+        analysis: None,
+        #[cfg(feature = "analysis")]
+        analysis_source: t.analysis_source.clone(),
         message: t.message.clone(),
         tempo: t.tempo,
         bitrate: t.bitrate,
