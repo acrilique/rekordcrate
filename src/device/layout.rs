@@ -119,6 +119,35 @@ impl Layout {
             .join(artwork_folder(id))
             .join(format!("a{id}_m.jpg"))
     }
+
+    /// Per-track analysis directory `PIONEER/USBANLZ/{folder}/{:08X}`.
+    ///
+    /// Ungated so callers can inspect an existing export's analysis files without enabling ANLZ
+    /// generation (mirrors `artwork_folder`).
+    #[must_use]
+    pub fn anlz_dir(&self, track_id: u32) -> PathBuf {
+        self.usbanlz_dir()
+            .join(anlz_folder(track_id))
+            .join(format!("{:08X}", track_id))
+    }
+
+    /// Host path to a track's `ANLZ0000.DAT` (base sections: beatgrid, cues, mono waveforms).
+    #[must_use]
+    pub fn anlz_dat_file(&self, track_id: u32) -> PathBuf {
+        self.anlz_dir(track_id).join("ANLZ0000.DAT")
+    }
+
+    /// Host path to a track's `ANLZ0000.EXT` (Nexus-era colored waveforms + song structure).
+    #[must_use]
+    pub fn anlz_ext_file(&self, track_id: u32) -> PathBuf {
+        self.anlz_dir(track_id).join("ANLZ0000.EXT")
+    }
+
+    /// Host path to a track's `ANLZ0000.2EX` (newest 3-band waveforms + per-band calibration).
+    #[must_use]
+    pub fn anlz_2ex_file(&self, track_id: u32) -> PathBuf {
+        self.anlz_dir(track_id).join("ANLZ0000.2EX")
+    }
 }
 
 /// Five-digit shard folder name for artwork `id`: `id/20 + 1`, zero-padded. This is compiled even
@@ -127,4 +156,25 @@ impl Layout {
 #[must_use]
 pub fn artwork_folder(id: u32) -> String {
     format!("{:05}", id / 20 + 1)
+}
+
+/// `Pnnn` shard folder for an ANLZ analysis file: `track_id / 1000 + 1`.
+///
+/// Rekordbox derives the real folder from a content hash with an unpublished rule; this
+/// deterministic-from-track-id placeholder produces unique paths and is safe because the player
+/// opens whatever path is in the PDB `analyze_path` column.
+#[must_use]
+pub fn anlz_folder(track_id: u32) -> String {
+    format!("P{:03}", track_id / 1000 + 1)
+}
+
+/// Device-relative path stored in the PDB `analyze_path` column: the `.DAT` the player loads
+/// first; sibling `.EXT`/`.2EX` are found by extension substitution on the same stem.
+#[must_use]
+pub fn anlz_device_path(track_id: u32) -> String {
+    format!(
+        "/PIONEER/USBANLZ/{}/{:08X}/ANLZ0000.DAT",
+        anlz_folder(track_id),
+        track_id
+    )
 }

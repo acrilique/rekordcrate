@@ -12,7 +12,12 @@ pub mod layout;
 pub mod reader;
 pub mod writer;
 
+#[cfg(feature = "analysis")]
+pub mod analysis;
+
 pub use crate::device::reader::DeviceExportReader;
-pub use crate::device::writer::{AddTrackOutcome, DeviceExportWriter, TagCategoryId, Track};
+pub use crate::device::writer::{
+    AddTrackOutcome, AnlzInput, DeviceExportWriter, TagCategoryId, Track,
+};
 
 pub use crate::device::reader::{get_playlists, Playlist, PlaylistFolder, PlaylistNode};

@@ -25,6 +25,8 @@ chrono = { version = "0.4", features = ["serde"], optional = true }
 rgb = { version = "0.8", optional = true }
 fallible-iterator = "0.3.0"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"], optional = true }
+symphonia = { version = "0.6.0", default-features = false, features = ["mp3", "aac", "isomp4", "wav", "flac", "pcm"], optional = true }
+realfft = { version = "3.5", optional = true }
 
 [build-dependencies]
 glob = "0.3"
@@ -38,6 +40,7 @@ default = ["cli", "xml"]
 cli = ["dep:clap"]
 xml = ["dep:serde", "dep:serde_repr", "dep:quick-xml", "dep:chrono", "dep:rgb"]
 artwork = ["dep:image"]
+analysis = ["dep:symphonia", "dep:realfft"]
 
 [[bin]]
 name = "rekordcrate"

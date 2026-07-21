@@ -124,18 +124,33 @@ pub struct Header {
 }
 
 impl Header {
-    fn remaining_size(&self) -> u32 {
+    /// Bytes between `kind`/`size`/`total_size` (12) and the start of content — i.e. the length
+    /// of any per-section header preamble beyond the fixed 12-byte prefix.
+    #[must_use]
+    pub fn remaining_size(&self) -> u32 {
         self.size - 12
     }
 
-    fn content_size(&self) -> u32 {
+    /// Bytes of payload that follow the header (`total_size - size`).
+    #[must_use]
+    pub fn content_size(&self) -> u32 {
         self.total_size - self.size
+    }
+
+    /// Header for a section with no preamble beyond the 12-byte prefix.
+    #[must_use]
+    pub fn for_section(kind: ContentKind, content_size: u32) -> Self {
+        Self {
+            kind,
+            size: 12,
+            total_size: 12 + content_size,
+        }
     }
 }
 
 /// A single beat inside the beat grid.
 #[binrw]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 #[brw(big)]
 pub struct Beat {
     /// Beat number inside the bar (1-4).
@@ -148,7 +163,7 @@ pub struct Beat {
 
 /// Describes the types of entries found in a Cue List section.
 #[binrw]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 #[brw(big, repr = u32)]
 pub enum CueListType {
     /// Memory cues or loops.
@@ -159,7 +174,7 @@ pub enum CueListType {
 
 /// Indicates if the cue is point or a loop.
 #[binrw]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 #[brw(repr = u8)]
 pub enum CueType {
     /// Cue is a single point.
@@ -170,7 +185,7 @@ pub enum CueType {
 
 /// A memory or hot cue (or loop).
 #[binrw]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 #[brw(big)]
 pub struct Cue {
     /// Cue entry header.
@@ -232,6 +247,32 @@ pub struct Cue {
     unknown6: u32,
     /// Unknown field.
     unknown7: u32,
+}
+
+impl Default for Cue {
+    fn default() -> Self {
+        Self {
+            header: Header {
+                kind: ContentKind::Cue,
+                size: 16,
+                total_size: 64,
+            },
+            hot_cue: 0,
+            status: 0,
+            unknown1: 0x0010_0000,
+            order_first: 0xffff,
+            order_last: 0xffff,
+            cue_type: CueType::Point,
+            unknown2: 0,
+            unknown3: 0x03e8,
+            time: 0,
+            loop_time: 0xffff_ffff,
+            unknown4: 0,
+            unknown5: 0,
+            unknown6: 0,
+            unknown7: 0,
+        }
+    }
 }
 
 /// A length-prefixed wide (UTF-16BE) string.
@@ -337,7 +378,7 @@ impl BinWrite for LenPrefixedWideString {
 
 /// A memory or hot cue (or loop).
 #[binrw]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 #[brw(big)]
 pub struct ExtendedCue {
     /// Cue entry header.
@@ -470,6 +511,39 @@ pub struct ExtendedCue {
     pub trailing: Vec<u8>,
 }
 
+impl Default for ExtendedCue {
+    fn default() -> Self {
+        Self {
+            header: Header {
+                kind: ContentKind::ExtendedCue,
+                size: 16,
+                total_size: 68,
+            },
+            hot_cue: 0,
+            cue_type: CueType::Point,
+            unknown1: 0,
+            unknown2: 1000,
+            time: 0,
+            loop_time: 0xffff_ffff,
+            color: ColorIndex::None,
+            unknown3: 1,
+            unknown4: 0,
+            unknown5: 0,
+            loop_numerator: 0,
+            loop_denominator: 0,
+            comment: LenPrefixedWideString(String::new()),
+            hot_cue_color_index: 0,
+            hot_cue_color_rgb: (0, 0, 0),
+            unknown6: 0,
+            unknown7: 0x00c1_7000,
+            unknown8: 0,
+            unknown9: 0,
+            unknown10: 0,
+            trailing: Vec::new(),
+        }
+    }
+}
+
 impl Default for WaveformPreviewColumn {
     fn default() -> Self {
         Self::new()
@@ -517,7 +591,7 @@ pub struct TinyWaveformPreviewColumn {
 /// See these the documentation for details:
 /// <https://djl-analysis.deepsymmetry.org/rekordbox-export-analysis/anlz.html#color-preview>
 #[binrw]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 #[brw(big)]
 pub struct WaveformColorPreviewColumn {
     /// Unknown field (somehow encodes the "whiteness").
@@ -532,6 +606,26 @@ pub struct WaveformColorPreviewColumn {
     pub energy_mid_third_freq: u8,
     /// Sound energy in the top of the frequency range.
     pub energy_top_third_freq: u8,
+}
+
+impl WaveformColorPreviewColumn {
+    /// The two private "whiteness" bytes default to `0`; their encoding is unknown.
+    #[must_use]
+    pub fn new(
+        energy_bottom_half_freq: u8,
+        energy_bottom_third_freq: u8,
+        energy_mid_third_freq: u8,
+        energy_top_third_freq: u8,
+    ) -> Self {
+        Self {
+            unknown1: 0,
+            unknown2: 0,
+            energy_bottom_half_freq,
+            energy_bottom_third_freq,
+            energy_mid_third_freq,
+            energy_top_third_freq,
+        }
+    }
 }
 
 impl Default for WaveformColorDetailColumn {
@@ -567,7 +661,7 @@ pub struct WaveformColorDetailColumn {
 /// See these the documentation for details:
 /// <https://djl-analysis.deepsymmetry.org/rekordbox-export-analysis/anlz.html#three-band-preview>
 #[binrw]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 #[brw(big)]
 pub struct Waveform3BandPreviewColumn {
     /// Sound energy in the mid of the frequency range.
@@ -583,7 +677,7 @@ pub struct Waveform3BandPreviewColumn {
 /// See these the documentation for details:
 /// <https://djl-analysis.deepsymmetry.org/rekordbox-export-analysis/anlz.html#three-band-detail>
 #[binrw]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 #[brw(big)]
 pub struct Waveform3BandDetailColumn {
     /// Sound energy in the mid of the frequency range.
@@ -762,6 +856,57 @@ pub enum Content {
     Unknown(#[br(args(header.clone()))] Unknown),
 }
 
+impl Content {
+    /// Tag identifying this variant on disk.
+    #[must_use]
+    pub fn kind(&self) -> ContentKind {
+        match self {
+            Self::BeatGrid(_) => ContentKind::BeatGrid,
+            Self::CueList(_) => ContentKind::CueList,
+            Self::ExtendedCueList(_) => ContentKind::ExtendedCueList,
+            Self::Path(_) => ContentKind::Path,
+            Self::VBR(_) => ContentKind::VBR,
+            Self::WaveformPreview(_) => ContentKind::WaveformPreview,
+            Self::TinyWaveformPreview(_) => ContentKind::TinyWaveformPreview,
+            Self::WaveformDetail(_) => ContentKind::WaveformDetail,
+            Self::WaveformColorPreview(_) => ContentKind::WaveformColorPreview,
+            Self::WaveformColorDetail(_) => ContentKind::WaveformColorDetail,
+            Self::Waveform3BandPreview(_) => ContentKind::Waveform3BandPreview,
+            Self::Waveform3BandDetail(_) => ContentKind::Waveform3BandDetail,
+            Self::SongStructure(_) => ContentKind::SongStructure,
+            // `Unknown` is read-only; its tag lives on the header, not here.
+            Self::Unknown(_) => ContentKind::Unknown([0, 0, 0, 0]),
+        }
+    }
+
+    /// Byte length of the fixed-size fields between the 12-byte header prefix and the data array.
+    /// Constant per variant.
+    #[must_use]
+    fn preamble_byte_len(&self) -> u32 {
+        match self {
+            // len_path: u32
+            Self::Path(_) => 4,
+            // len_preview: u32 + unknown: u32
+            Self::WaveformPreview(_) | Self::TinyWaveformPreview(_) => 8,
+            // len_entry_bytes: u32 + len_entries: u32 + unknown: u32
+            Self::WaveformDetail(_)
+            | Self::WaveformColorPreview(_)
+            | Self::WaveformColorDetail(_)
+            | Self::Waveform3BandDetail(_) => 12,
+            // len_entry_bytes: u32 + len_entries: u32 (no unknown field)
+            Self::Waveform3BandPreview(_) => 8,
+            // unknown1: u32 + unknown2: u32 + len_beats: u32
+            Self::BeatGrid(_) => 12,
+            // list_type: u32 + unknown: u16 + len_cues: u16 + memory_count: u32
+            Self::CueList(_) => 12,
+            // list_type: u32 + len_cues: u16 + unknown: u16
+            Self::ExtendedCueList(_) => 8,
+            // No preamble: the whole content is the data blob.
+            Self::VBR(_) | Self::SongStructure(_) | Self::Unknown(_) => 0,
+        }
+    }
+}
+
 /// All beats in the track.
 #[binrw]
 #[derive(Debug, PartialEq, Eq)]
@@ -781,6 +926,19 @@ pub struct BeatGrid {
     pub beats: Vec<Beat>,
 }
 
+impl BeatGrid {
+    /// Build a beat grid from its beats, filling the private unknown header fields with the
+    /// constants observed on real exports (`unknown1 = 0`, `unknown2 = 0x00800000`).
+    #[must_use]
+    pub fn new(beats: Vec<Beat>) -> Self {
+        Self {
+            unknown1: 0,
+            unknown2: 0x0080_0000,
+            beats,
+        }
+    }
+}
+
 /// List of cue points or loops (either hot cues or memory cues).
 #[binrw]
 #[derive(Debug, PartialEq, Eq)]
@@ -798,6 +956,20 @@ pub struct CueList {
     /// Cues
     #[br(count = usize::from(len_cues))]
     pub cues: Vec<Cue>,
+}
+
+impl CueList {
+    /// Build a cue list from its type and cues, filling the private unknown fields with the
+    /// constants observed on real exports (`unknown = 0`, `memory_count = 0`).
+    #[must_use]
+    pub fn new(list_type: CueListType, cues: Vec<Cue>) -> Self {
+        Self {
+            list_type,
+            unknown: 0,
+            memory_count: 0,
+            cues,
+        }
+    }
 }
 
 /// List of cue points or loops (either hot cues or memory cues, extended version).
@@ -821,6 +993,19 @@ pub struct ExtendedCueList {
     pub cues: Vec<ExtendedCue>,
 }
 
+impl ExtendedCueList {
+    /// Build an extended cue list from its type and cues. The private `unknown` field is fixed to
+    /// `0` (the only value the read path accepts).
+    #[must_use]
+    pub fn new(list_type: CueListType, cues: Vec<ExtendedCue>) -> Self {
+        Self {
+            list_type,
+            unknown: 0,
+            cues,
+        }
+    }
+}
+
 /// Path of the audio file that this analysis belongs to.
 #[binrw]
 #[derive(Debug, PartialEq, Eq)]
@@ -835,6 +1020,16 @@ pub struct Path {
     #[br(assert(len_path == header.content_size()))]
     #[br(assert((path.len() as u32 + 1) * 2 == len_path))]
     pub path: NullWideString,
+}
+
+impl Path {
+    /// Build a path section from a string. The byte-length prefix is auto-computed on write.
+    #[must_use]
+    pub fn new(path: impl Into<String>) -> Self {
+        Self {
+            path: NullWideString::from(path.into()),
+        }
+    }
 }
 
 /// Seek information for variable bitrate files (probably).
@@ -860,10 +1055,19 @@ pub struct WaveformPreview {
     #[bw(calc = data.len() as u32)]
     len_preview: u32,
     /// Unknown field (apparently always `0x00100000`)
+    #[bw(calc = 0x0001_0000u32)]
     unknown: u32,
     /// Waveform preview column data.
     #[br(count = len_preview)]
     pub data: Vec<WaveformPreviewColumn>,
+}
+
+impl WaveformPreview {
+    /// Build a mono waveform preview from its column data.
+    #[must_use]
+    pub fn new(data: Vec<WaveformPreviewColumn>) -> Self {
+        Self { data }
+    }
 }
 
 /// Smaller version of the fixed-width monochrome preview of the track waveform.
@@ -877,10 +1081,19 @@ pub struct TinyWaveformPreview {
     #[bw(calc = data.len() as u32)]
     len_preview: u32,
     /// Unknown field (apparently always `0x00100000`)
+    #[bw(calc = 0x0001_0000u32)]
     unknown: u32,
     /// Waveform preview column data.
     #[br(count = len_preview)]
     pub data: Vec<TinyWaveformPreviewColumn>,
+}
+
+impl TinyWaveformPreview {
+    /// Build a tiny mono waveform preview from its column data.
+    #[must_use]
+    pub fn new(data: Vec<TinyWaveformPreviewColumn>) -> Self {
+        Self { data }
+    }
 }
 
 /// Variable-width large monochrome version of the track waveform.
@@ -902,6 +1115,7 @@ pub struct WaveformDetail {
     len_entries: u32,
     /// Unknown field (apparently always `0x00960000`)
     #[br(assert(unknown == 0x00960000))]
+    #[bw(calc = 0x0096_0000u32)]
     unknown: u32,
     /// Waveform preview column data.
     ///
@@ -909,6 +1123,14 @@ pub struct WaveformDetail {
     /// so for each second of track audio there are 150 waveform detail entries.
     #[br(count = len_entries)]
     pub data: Vec<WaveformPreviewColumn>,
+}
+
+impl WaveformDetail {
+    /// Build a mono waveform detail (150 columns/sec) from its column data.
+    #[must_use]
+    pub fn new(data: Vec<WaveformPreviewColumn>) -> Self {
+        Self { data }
+    }
 }
 
 /// Smaller version of the fixed-width colored preview of the track waveform.
@@ -929,10 +1151,19 @@ pub struct WaveformColorPreview {
     #[br(assert((len_entry_bytes * len_entries) == header.content_size()))]
     len_entries: u32,
     /// Unknown field.
+    #[bw(calc = 0u32)]
     unknown: u32,
     /// Waveform preview column data.
     #[br(count = len_entries)]
     pub data: Vec<WaveformColorPreviewColumn>,
+}
+
+impl WaveformColorPreview {
+    /// Build a color waveform preview from its column data.
+    #[must_use]
+    pub fn new(data: Vec<WaveformColorPreviewColumn>) -> Self {
+        Self { data }
+    }
 }
 
 /// Variable-width large colored version of the track waveform.
@@ -953,6 +1184,7 @@ pub struct WaveformColorDetail {
     #[br(assert((len_entry_bytes * len_entries) == header.content_size()))]
     len_entries: u32,
     /// Unknown field.
+    #[bw(calc = 0x0096_0305u32)]
     unknown: u32,
     /// Waveform detail column data.
     ///
@@ -960,6 +1192,14 @@ pub struct WaveformColorDetail {
     /// so for each second of track audio there are 150 waveform detail entries.
     #[br(count = len_entries)]
     pub data: Vec<WaveformColorDetailColumn>,
+}
+
+impl WaveformColorDetail {
+    /// Build a color waveform detail (150 columns/sec) from its column data.
+    #[must_use]
+    pub fn new(data: Vec<WaveformColorDetailColumn>) -> Self {
+        Self { data }
+    }
 }
 
 /// Smaller version of the fixed-width 3-band preview of the track waveform.
@@ -1003,6 +1243,7 @@ pub struct Waveform3BandDetail {
     len_entries: u32,
     /// Unknown field (apparently always `0x00960000`)
     #[br(assert(unknown == 0x00960000))]
+    #[bw(calc = 0x0096_0000u32)]
     unknown: u32,
     /// Waveform detail column data.
     ///
@@ -1010,6 +1251,22 @@ pub struct Waveform3BandDetail {
     /// so for each second of track audio there are 150 waveform detail entries.
     #[br(count = len_entries)]
     pub data: Vec<Waveform3BandDetailColumn>,
+}
+
+impl Waveform3BandDetail {
+    /// Build a 3-band waveform detail (150 columns/sec) from its column data.
+    #[must_use]
+    pub fn new(data: Vec<Waveform3BandDetailColumn>) -> Self {
+        Self { data }
+    }
+}
+
+impl Waveform3BandPreview {
+    /// Build a 3-band waveform preview from its column data.
+    #[must_use]
+    pub fn new(data: Vec<Waveform3BandPreviewColumn>) -> Self {
+        Self { data }
+    }
 }
 
 /// Describes the structure of a song (Intro, Chrous, Verse, etc.).
@@ -1153,6 +1410,32 @@ pub struct Section {
     pub content: Content,
 }
 
+impl Section {
+    /// Serialize `content` to measure its size, then stamp the header. `header.kind` is inferred
+    /// from the content variant.
+    ///
+    /// # Errors
+    ///
+    /// Propagates a binrw error if the content cannot be serialized.
+    pub fn new(content: Content) -> BinResult<Self> {
+        let kind = content.kind();
+        let mut buf = binrw::io::Cursor::new(Vec::new());
+        content.write_options(&mut buf, Endian::Big, ())?;
+        let total_content_bytes = buf.into_inner().len() as u32;
+        let preamble_bytes = content.preamble_byte_len();
+        let size = 12 + preamble_bytes;
+        let total_size = 12 + total_content_bytes;
+        Ok(Self {
+            header: Header {
+                kind,
+                size,
+                total_size,
+            },
+            content,
+        })
+    }
+}
+
 /// ANLZ file section.
 ///
 /// The actual contents are not part of this struct and can parsed on-the-fly by iterating over the
@@ -1173,6 +1456,39 @@ pub struct ANLZ {
 }
 
 impl ANLZ {
+    /// 16-byte preamble following the 12-byte `PMAI` prefix, observed on every fixture.
+    /// Meaning unknown; Rekordbox writes this exact sequence.
+    const FILE_HEADER_DATA: [u8; 16] = [
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00,
+    ];
+
+    /// Build an `ANLZ` from sections, computing the `PMAI` header's `size`/`total_size` from the
+    /// serialized section bytes. `header_data` is fixed to [`Self::FILE_HEADER_DATA`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates a binrw error if the sections cannot be serialized.
+    pub fn new(sections: Vec<Section>) -> BinResult<Self> {
+        let mut buf = binrw::io::Cursor::new(Vec::new());
+        for section in &sections {
+            section.write_options(&mut buf, Endian::Big, ())?;
+        }
+        let content_size = buf.into_inner().len() as u32;
+        let header = Header {
+            kind: ContentKind::File,
+            size: 12 + u32::try_from(Self::FILE_HEADER_DATA.len()).unwrap_or(u32::MAX),
+            total_size: 12
+                + u32::try_from(Self::FILE_HEADER_DATA.len()).unwrap_or(u32::MAX)
+                + content_size,
+        };
+        Ok(Self {
+            header,
+            header_data: Self::FILE_HEADER_DATA.to_vec(),
+            sections,
+        })
+    }
+
     fn parse_sections<R: Read + Seek>(
         reader: &mut R,
         endian: Endian,
@@ -1245,5 +1561,52 @@ mod tests {
         };
 
         test_roundtrip(&raw, cue);
+    }
+
+    /// Rebuild the P053 fixtures via `ANLZ::new` and assert byte-identical output. Proves the
+    /// constructors produce correct size/total_size for every section type present.
+    #[test]
+    fn anlz_roundtrips_p053_fixture_set() {
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("data/complete_export/demo_tracks/PIONEER/USBANLZ/P053/0001D21F");
+        for ext in &["DAT", "EXT", "2EX"] {
+            let path = base.join(format!("ANLZ0000.{ext}"));
+            let original = std::fs::read(&path).expect("fixture should be readable");
+            let mut reader = std::io::Cursor::new(&original);
+            let parsed = ANLZ::read(&mut reader).expect("fixture should parse");
+
+            let rebuilt = ANLZ::new(parsed.sections).expect("rebuild via ANLZ::new should succeed");
+            let mut out = Vec::new();
+            let mut cursor = std::io::Cursor::new(&mut out);
+            rebuilt
+                .write(&mut cursor)
+                .expect("rebuilt ANLZ should serialize");
+
+            assert_eq!(original, out, "rebuilt {ext} differs from fixture");
+        }
+    }
+
+    #[test]
+    fn anlz_new_empty_roundtrips() {
+        let empty = ANLZ::new(vec![]).expect("empty ANLZ should construct");
+        let mut out = Vec::new();
+        let mut cursor = std::io::Cursor::new(&mut out);
+        empty
+            .write(&mut cursor)
+            .expect("empty ANLZ should serialize");
+
+        let mut reader = std::io::Cursor::new(&out);
+        let reparsed = ANLZ::read(&mut reader).expect("empty ANLZ should re-parse");
+        assert!(reparsed.sections.is_empty());
+        assert_eq!(reparsed.header.kind, ContentKind::File);
+    }
+
+    #[test]
+    fn header_for_section_roundtrips_through_content_size() {
+        let h = Header::for_section(ContentKind::BeatGrid, 100);
+        assert_eq!(h.size, 12);
+        assert_eq!(h.total_size, 112);
+        assert_eq!(h.content_size(), 100);
+        assert_eq!(h.remaining_size(), 0);
     }
 }

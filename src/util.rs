@@ -110,6 +110,17 @@ pub enum RekordcrateError {
         /// Human-readable detail from the underlying failure.
         message: String,
     },
+
+    /// ANLZ analysis file generation failed (serializing/writing `.DAT`/`.EXT`/`.2EX`, or — under
+    /// the `analysis` feature — decoding/analyzing audio). Unconditional so generation-only crates
+    /// don't leak into the public error type.
+    #[error("anlz error for {path:?}: {message}")]
+    AnlzError {
+        /// Path of the ANLZ file (or source audio file, under the `analysis` feature).
+        path: std::path::PathBuf,
+        /// Human-readable detail from the underlying failure.
+        message: String,
+    },
 }
 
 /// Type alias for results where the error is a `RekordcrateError`.

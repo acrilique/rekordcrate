@@ -134,6 +134,17 @@ pub struct Track {
     pub file_type: FileType,
     /// Whether stored hotcues auto-load on a CDJ. Maps to the PDB string `"ON"` / empty.
     pub autoload_hotcues: bool,
+    /// Pre-computed ANLZ content. When `Some`, the writer emits `ANLZ0000.DAT` (plus `.EXT`/`.2EX`
+    /// for the populated column groups) and stores the device path in `analyze_path`. Beats and
+    /// cues are always caller-provided — the library does not do beat detection.
+    ///
+    /// Under the `analysis` feature, leave this `None` and set `analysis_source` to have the
+    /// writer compute the waveform columns from audio (beats/cues still come from here).
+    pub analysis: Option<AnlzInput>,
+    /// Host path to the audio file, used under the `analysis` feature when [`Self::analysis`] is
+    /// `None`.
+    #[cfg(feature = "analysis")]
+    pub analysis_source: String,
 }
 
 impl Track {
@@ -189,8 +200,40 @@ impl Default for Track {
             color: ColorIndex::None,
             file_type: FileType::Unknown,
             autoload_hotcues: false,
+            analysis: None,
+            #[cfg(feature = "analysis")]
+            analysis_source: String::new(),
         }
     }
+}
+
+/// Caller-provided ANLZ content for a track. Beats/cues go to `.DAT` (extended cues mirror to
+/// `.EXT`); the `Option` column groups select which sibling files are written — `None` skips that
+/// file.
+#[derive(Debug, Clone)]
+pub struct AnlzInput {
+    /// Beat grid (caller-provided).
+    pub beats: Vec<crate::anlz::Beat>,
+    /// Plain cues for the `.DAT` cue list. Empty = no cue section.
+    pub cues: Vec<crate::anlz::Cue>,
+    /// Extended cues for the `.EXT` cue list. Empty = no extended cue section.
+    pub cues_extended: Vec<crate::anlz::ExtendedCue>,
+    /// Cue list type shared by `cues` and `cues_extended`.
+    pub cue_list_type: crate::anlz::CueListType,
+    /// Fixed-width mono preview (`PWAV`). Empty = no `PWAV` section.
+    pub preview_mono: Vec<crate::anlz::WaveformPreviewColumn>,
+    /// Fixed-width tiny mono preview (`PWV2`). Empty = no `PWV2` section.
+    pub tiny_preview: Vec<crate::anlz::TinyWaveformPreviewColumn>,
+    /// Variable-width mono detail (`PWV3`, 150 Hz). `None` = omitted from `.EXT`.
+    pub detail_mono: Option<Vec<crate::anlz::WaveformPreviewColumn>>,
+    /// Fixed-width color preview (`PWV4`). `None` = omitted from `.EXT`.
+    pub color_preview: Option<Vec<crate::anlz::WaveformColorPreviewColumn>>,
+    /// Variable-width color detail (`PWV5`, 150 Hz). `None` = omitted from `.EXT`.
+    pub color_detail: Option<Vec<crate::anlz::WaveformColorDetailColumn>>,
+    /// Fixed-width 3-band preview (`PWV6`). `None` = omitted from `.2EX`.
+    pub band3_preview: Option<Vec<crate::anlz::Waveform3BandPreviewColumn>>,
+    /// Variable-width 3-band detail (`PWV7`, 150 Hz). `None` = omitted from `.2EX`.
+    pub band3_detail: Option<Vec<crate::anlz::Waveform3BandDetailColumn>>,
 }
 
 /// The outcome of [`DeviceExportWriter::add_track`]: either a freshly inserted track or an
@@ -299,6 +342,14 @@ fn canonical_key_name(name: &str) -> String {
 #[cfg(feature = "artwork")]
 fn artwork_device_path(id: u32) -> String {
     format!("/PIONEER/Artwork/{}/a{id}.jpg", artwork_folder(id))
+}
+
+/// Wrap a binrw error from ANLZ serialization into [`Error::AnlzError`].
+fn anlz_err(path: std::path::PathBuf, e: binrw::Error) -> Error {
+    Error::AnlzError {
+        path,
+        message: e.to_string(),
+    }
 }
 
 impl Drop for DeviceExportWriter {
@@ -615,7 +666,12 @@ impl DeviceExportWriter {
             }
         }
 
-        let (mut pdb_track, comment) = self.build_pdb_track(track)?;
+        // Allocate the track id before building the PDB row so `analyze_path` can be derived.
+        let track_id = self.next_track_id;
+        let analysis_input = self.resolve_analysis(track, track_id)?;
+
+        let (mut pdb_track, comment) =
+            self.build_pdb_track(track, track_id, analysis_input.is_some())?;
 
         let artist_id = self.get_or_create_artist(&track.artist)?;
         let album_id = self.get_or_create_album(&track.album, artist_id)?;
@@ -640,9 +696,6 @@ impl DeviceExportWriter {
             self.get_or_create_artist(&track.remixer)?
         };
 
-        let track_id = self.next_track_id;
-        self.next_track_id += 1;
-
         pdb_track.id = TrackId(track_id);
         pdb_track.artist_id = ArtistId(artist_id);
         pdb_track.album_id = AlbumId(album_id);
@@ -655,6 +708,13 @@ impl DeviceExportWriter {
         pdb_track.remixer_id = ArtistId(remixer_id);
 
         self.db().add_row(Row::Plain(PlainRow::Track(pdb_track)))?;
+
+        // Write ANLZ files after the row lands, so a PDB failure leaves no orphans. Bump the id
+        // counter only after both succeed.
+        if let Some(input) = &analysis_input {
+            self.write_anlz_files(track_id, &track.file_path, input)?;
+        }
+        self.next_track_id += 1;
 
         self.track_ids.insert(track_id);
         if !track.file_path.is_empty() {
@@ -671,9 +731,171 @@ impl DeviceExportWriter {
         })
     }
 
+    /// Returns the caller-provided `track.analysis`, or — under the `analysis` feature — the
+    /// columns computed from `analysis_source`. `None` when no ANLZ generation is requested.
+    #[allow(unused_variables)]
+    fn resolve_analysis(&self, track: &Track, track_id: u32) -> Result<Option<AnlzInput>> {
+        if let Some(input) = &track.analysis {
+            return Ok(Some(input.clone()));
+        }
+        #[cfg(feature = "analysis")]
+        if !track.analysis_source.is_empty() {
+            let computed =
+                crate::device::analysis::analyze(std::path::Path::new(&track.analysis_source))?;
+            return Ok(Some(computed.into_input(track)));
+        }
+        Ok(None)
+    }
+
+    /// Write the `ANLZ0000.{DAT,EXT,2EX}` files for `track_id`. A file is written only when
+    /// `input` carries data for it; each always begins with a `PPTH` section for `file_path`.
+    fn write_anlz_files(&self, track_id: u32, file_path: &str, input: &AnlzInput) -> Result<()> {
+        use crate::anlz as a;
+
+        // `.DAT`: beats, plain cues, mono previews.
+        let dat_sections: Vec<a::Section> = {
+            let mut s = vec![a::Section::new(a::Content::Path(a::Path::new(file_path)))
+                .map_err(|e| anlz_err(self.layout.anlz_dat_file(track_id), e))?];
+            if !input.beats.is_empty() {
+                s.push(
+                    a::Section::new(a::Content::BeatGrid(a::BeatGrid::new(input.beats.clone())))
+                        .map_err(|e| anlz_err(self.layout.anlz_dat_file(track_id), e))?,
+                );
+            }
+            if !input.cues.is_empty() {
+                s.push(
+                    a::Section::new(a::Content::CueList(a::CueList::new(
+                        input.cue_list_type,
+                        input.cues.clone(),
+                    )))
+                    .map_err(|e| anlz_err(self.layout.anlz_dat_file(track_id), e))?,
+                );
+            }
+            if !input.preview_mono.is_empty() {
+                s.push(
+                    a::Section::new(a::Content::WaveformPreview(a::WaveformPreview::new(
+                        input.preview_mono.clone(),
+                    )))
+                    .map_err(|e| anlz_err(self.layout.anlz_dat_file(track_id), e))?,
+                );
+            }
+            if !input.tiny_preview.is_empty() {
+                s.push(
+                    a::Section::new(a::Content::TinyWaveformPreview(
+                        a::TinyWaveformPreview::new(input.tiny_preview.clone()),
+                    ))
+                    .map_err(|e| anlz_err(self.layout.anlz_dat_file(track_id), e))?,
+                );
+            }
+            s
+        };
+        if dat_sections.len() > 1 {
+            self.write_one_anlz(track_id, "DAT", dat_sections)?;
+        }
+
+        // `.EXT`: extended cues, mono detail, color preview/detail.
+        let ext_has_data = !input.cues_extended.is_empty()
+            || input.detail_mono.is_some()
+            || input.color_preview.is_some()
+            || input.color_detail.is_some();
+        if ext_has_data {
+            let mut ext_sections = vec![a::Section::new(a::Content::Path(a::Path::new(file_path)))
+                .map_err(|e| anlz_err(self.layout.anlz_ext_file(track_id), e))?];
+            if !input.cues_extended.is_empty() {
+                ext_sections.push(
+                    a::Section::new(a::Content::ExtendedCueList(a::ExtendedCueList::new(
+                        input.cue_list_type,
+                        input.cues_extended.clone(),
+                    )))
+                    .map_err(|e| anlz_err(self.layout.anlz_ext_file(track_id), e))?,
+                );
+            }
+            if let Some(detail) = &input.detail_mono {
+                ext_sections.push(
+                    a::Section::new(a::Content::WaveformDetail(a::WaveformDetail::new(
+                        detail.clone(),
+                    )))
+                    .map_err(|e| anlz_err(self.layout.anlz_ext_file(track_id), e))?,
+                );
+            }
+            if let Some(cols) = &input.color_preview {
+                ext_sections.push(
+                    a::Section::new(a::Content::WaveformColorPreview(
+                        a::WaveformColorPreview::new(cols.clone()),
+                    ))
+                    .map_err(|e| anlz_err(self.layout.anlz_ext_file(track_id), e))?,
+                );
+            }
+            if let Some(cols) = &input.color_detail {
+                ext_sections.push(
+                    a::Section::new(a::Content::WaveformColorDetail(
+                        a::WaveformColorDetail::new(cols.clone()),
+                    ))
+                    .map_err(|e| anlz_err(self.layout.anlz_ext_file(track_id), e))?,
+                );
+            }
+            self.write_one_anlz(track_id, "EXT", ext_sections)?;
+        }
+
+        // `.2EX`: 3-band preview/detail.
+        let has_2ex = input.band3_preview.is_some() || input.band3_detail.is_some();
+        if has_2ex {
+            let mut twoex_sections =
+                vec![a::Section::new(a::Content::Path(a::Path::new(file_path)))
+                    .map_err(|e| anlz_err(self.layout.anlz_2ex_file(track_id), e))?];
+            if let Some(cols) = &input.band3_preview {
+                twoex_sections.push(
+                    a::Section::new(a::Content::Waveform3BandPreview(
+                        a::Waveform3BandPreview::new(cols.clone()),
+                    ))
+                    .map_err(|e| anlz_err(self.layout.anlz_2ex_file(track_id), e))?,
+                );
+            }
+            if let Some(cols) = &input.band3_detail {
+                twoex_sections.push(
+                    a::Section::new(a::Content::Waveform3BandDetail(
+                        a::Waveform3BandDetail::new(cols.clone()),
+                    ))
+                    .map_err(|e| anlz_err(self.layout.anlz_2ex_file(track_id), e))?,
+                );
+            }
+            self.write_one_anlz(track_id, "2EX", twoex_sections)?;
+        }
+
+        Ok(())
+    }
+
+    /// Serialize `sections` to `ANLZ0000.{ext}` for `track_id`, creating the parent directory.
+    fn write_one_anlz(
+        &self,
+        track_id: u32,
+        ext: &str,
+        sections: Vec<crate::anlz::Section>,
+    ) -> Result<()> {
+        let dest = match ext {
+            "DAT" => self.layout.anlz_dat_file(track_id),
+            "EXT" => self.layout.anlz_ext_file(track_id),
+            "2EX" => self.layout.anlz_2ex_file(track_id),
+            _ => unreachable!("ext is one of DAT/EXT/2EX"),
+        };
+        let anlz = crate::anlz::ANLZ::new(sections).map_err(|e| anlz_err(dest.clone(), e))?;
+        fs::create_dir_all(dest.parent().expect("anlz path always has a folder"))?;
+        let mut file = fs::File::create(&dest).map_err(|e| Error::AnlzError {
+            path: dest.clone(),
+            message: e.to_string(),
+        })?;
+        anlz.write(&mut file).map_err(|e| anlz_err(dest, e))?;
+        Ok(())
+    }
+
     /// Encode all strings, set scalar fields, grow `comment` past the 221-byte minimum. Allocates
-    /// no IDs, inserts nothing.
-    fn build_pdb_track(&self, track: &Track) -> Result<(crate::pdb::Track, String)> {
+    /// no IDs, inserts nothing. `has_analysis` controls whether `analyze_path` is set.
+    fn build_pdb_track(
+        &self,
+        track: &Track,
+        track_id: u32,
+        has_analysis: bool,
+    ) -> Result<(crate::pdb::Track, String)> {
         // Only `comment` grows below; hoist the rest so they're encoded once.
         let isrc = DeviceSQLString::new(&track.isrc)?;
         let lyricist = DeviceSQLString::new(&track.lyricist)?;
@@ -686,6 +908,11 @@ impl DeviceExportWriter {
         let file_path = DeviceSQLString::new(&track.file_path)?;
         let autoload_hotcues = if track.autoload_hotcues {
             DeviceSQLString::new("ON")?
+        } else {
+            DeviceSQLString::empty()
+        };
+        let analyze_path = if has_analysis {
+            DeviceSQLString::new(&crate::device::layout::anlz_device_path(track_id))?
         } else {
             DeviceSQLString::empty()
         };
@@ -740,7 +967,7 @@ impl DeviceExportWriter {
                     release_date,
                     mix_name,
                     unknown_string7: DeviceSQLString::empty(),
-                    analyze_path: DeviceSQLString::empty(),
+                    analyze_path,
                     analyze_date: DeviceSQLString::empty(),
                     comment: DeviceSQLString::empty(),
                     title,
@@ -2240,5 +2467,100 @@ mod tests {
         let leaf = tag_row(ParentId(NonZero::new(1)), 0, TagId(2), false, 3, "L").unwrap();
         assert_eq!(leaf.raw_is_category, 0);
         assert_eq!(leaf.index_shift, 0x0060);
+    }
+
+    /// Caller-provided analysis lands at the id-derived paths and re-parses to the expected
+    /// section kinds; `analyze_path` is populated.
+    #[test]
+    fn add_track_with_analysis_writes_anlz_files() {
+        use crate::anlz::{
+            Beat, CueListType, WaveformColorPreviewColumn, WaveformPreviewColumn, ANLZ,
+        };
+        use binrw::BinRead;
+
+        let dir =
+            std::env::temp_dir().join(format!("rekordcrate-anlz-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let input = AnlzInput {
+            beats: vec![Beat {
+                beat_number: 1,
+                tempo: 12_800,
+                time: 0,
+            }],
+            cues: Vec::new(),
+            cues_extended: Vec::new(),
+            cue_list_type: CueListType::MemoryCues,
+            preview_mono: vec![WaveformPreviewColumn::new()],
+            tiny_preview: Vec::new(),
+            detail_mono: None,
+            color_preview: Some(vec![WaveformColorPreviewColumn::new(10, 20, 30, 40)]),
+            color_detail: None,
+            band3_preview: None,
+            band3_detail: None,
+        };
+
+        let t = Track {
+            title: "test".into(),
+            file_path: "/Contents/test.mp3".into(),
+            analysis: Some(input),
+            ..Default::default()
+        };
+
+        let mut dev = DeviceExportWriter::create(&dir).unwrap();
+        let outcome = dev.add_track(&t).unwrap();
+        assert!(outcome.is_new);
+        dev.close().unwrap();
+
+        // Track id 1 → P001/00000001.
+        let dat = dir.join("PIONEER/USBANLZ/P001/00000001/ANLZ0000.DAT");
+        let ext = dir.join("PIONEER/USBANLZ/P001/00000001/ANLZ0000.EXT");
+        assert!(dat.exists(), "DAT should be written");
+        assert!(ext.exists(), "EXT should be written");
+        let twoex = dir.join("PIONEER/USBANLZ/P001/00000001/ANLZ0000.2EX");
+        assert!(
+            !twoex.exists(),
+            "2EX should not be written without 3-band data"
+        );
+
+        let dat_bytes = std::fs::read(&dat).unwrap();
+        let parsed = ANLZ::read(&mut std::io::Cursor::new(&dat_bytes)).unwrap();
+        let kinds: Vec<_> = parsed
+            .sections
+            .iter()
+            .map(|s| s.header.kind.clone())
+            .collect();
+        use crate::anlz::ContentKind as K;
+        assert!(kinds.contains(&K::Path), "DAT missing PPTH");
+        assert!(kinds.contains(&K::BeatGrid), "DAT missing PQTZ");
+        assert!(kinds.contains(&K::WaveformPreview), "DAT missing PWAV");
+
+        let ext_bytes = std::fs::read(&ext).unwrap();
+        let parsed = ANLZ::read(&mut std::io::Cursor::new(&ext_bytes)).unwrap();
+        let kinds: Vec<_> = parsed
+            .sections
+            .iter()
+            .map(|s| s.header.kind.clone())
+            .collect();
+        assert!(kinds.contains(&K::WaveformColorPreview), "EXT missing PWV4");
+
+        let mut dev = DeviceExportWriter::open(&dir).unwrap();
+        let track = dev
+            .db()
+            .iter_rows::<crate::pdb::Track>()
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        let analyze_path = track
+            .offsets
+            .inner
+            .analyze_path
+            .clone()
+            .into_string()
+            .unwrap();
+        assert_eq!(analyze_path, "/PIONEER/USBANLZ/P001/00000001/ANLZ0000.DAT");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
