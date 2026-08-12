@@ -12,6 +12,11 @@ pub mod layout;
 pub mod reader;
 pub mod writer;
 
+/// ANLZ column construction shared by `analysis` (FFT) and `cpp` (caller-supplied) paths. Owned
+/// here so format knowledge lives in one place regardless of how the bands arrive.
+#[cfg(any(feature = "analysis", feature = "cpp"))]
+pub mod anlz_build;
+
 #[cfg(feature = "analysis")]
 pub mod analysis;
 

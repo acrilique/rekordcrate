@@ -17,17 +17,11 @@ use crate::anlz::{
     TinyWaveformPreviewColumn, Waveform3BandDetailColumn, Waveform3BandPreviewColumn,
     WaveformColorDetailColumn, WaveformColorPreviewColumn, WaveformPreviewColumn,
 };
+use crate::device::anlz_build::{build_band_columns, DETAIL_HZ, PREVIEW_HZ};
 use crate::device::writer::{AnlzInput, Track};
 use crate::{Error, Result};
 use realfft::RealFftPlanner;
 use std::path::Path;
-
-/// Detail section columns per second (PWV3/PWV5/PWV7). Pinned by the format: 75 frames/sec × 2.
-const DETAIL_HZ: f64 = 150.0;
-
-/// Preview section columns per second (PWAV/PWV2/PWV4/PWV6). Not pinned by the format; Rekordbox
-/// uses ~1 column per 150 ms. Heuristic, matches observed fixtures within a few percent.
-const PREVIEW_HZ: f64 = 6.667;
 
 /// FFT window size in samples. Must be a power of two for `realfft`.
 const FFT_SIZE: usize = 1024;
@@ -285,23 +279,6 @@ fn quantize_bands(bands: &[(f32, f32, f32)]) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     (low, mid, high)
 }
 
-/// Map band energies to a packed color-detail column. RGB mapping is a guess.
-fn color_detail_column(low: u8, mid: u8, high: u8, peak: f32) -> WaveformColorDetailColumn {
-    let height = (peak * 31.0).round().clamp(0.0, 31.0) as u8;
-    let (r, g, b) = if high >= mid && high >= low {
-        (0u8, 0, 7) // high → blue
-    } else if mid >= low {
-        (0, 7, 0) // mid → green
-    } else {
-        (7, 0, 0) // low → red
-    };
-    WaveformColorDetailColumn::new()
-        .with_red(r)
-        .with_green(g)
-        .with_blue(b)
-        .with_height(height)
-}
-
 /// Analyze `path` and produce all waveform column vectors.
 ///
 /// # Errors
@@ -316,63 +293,25 @@ pub fn analyze(path: &Path) -> Result<ComputedAnlz> {
     let bands = build_band_energies(&mono, sample_rate);
     let (low, mid, high) = quantize_bands(&bands);
 
-    // Color preview (PWV4): average band energies across the detail columns in each slot.
-    let samples_per_preview = (f64::from(sample_rate) / PREVIEW_HZ).round() as usize;
-    let mut color_preview = Vec::with_capacity(preview_mono.len());
-    let mut detail_idx = 0;
-    let detail_per_preview = (DETAIL_HZ / PREVIEW_HZ).round() as usize;
-    let mut preview_start = 0;
-    while preview_start < mono.len() {
-        let preview_end = mono.len().min(preview_start + samples_per_preview);
-        let n = detail_per_preview.max(1);
-        let band_range = detail_idx..(detail_idx + n).min(bands.len());
-        let (l, m, h) = if band_range.is_empty() {
-            (0u8, 0, 0)
-        } else {
-            let count = band_range.len() as u32;
-            let bl = band_range.clone().map(|i| u32::from(low[i])).sum::<u32>() / count;
-            let bm = band_range.clone().map(|i| u32::from(mid[i])).sum::<u32>() / count;
-            let bh = band_range.clone().map(|i| u32::from(high[i])).sum::<u32>() / count;
-            (bl as u8, bm as u8, bh as u8)
-        };
-        color_preview.push(WaveformColorPreviewColumn::new(l, l, m, h));
-        detail_idx += n;
-        preview_start = preview_end;
-    }
-
-    // Color detail (PWV5): one column per detail slot.
-    let color_detail: Vec<WaveformColorDetailColumn> = low
+    // Pack the quantized bands into the 3-tuple shape `build_band_columns` expects, and derive the
+    // per-column peak heights (0-31) from the time-domain mono at DETAIL_HZ — PWV5 carries an
+    // independent height that band energies alone can't recover.
+    let samples_per_detail = (f64::from(sample_rate) / DETAIL_HZ).round() as usize;
+    let bands_3tuple: Vec<(u8, u8, u8)> = low
         .iter()
         .zip(mid.iter().zip(high.iter()))
-        .enumerate()
-        .map(|(i, (&l, (&m, &h)))| {
-            let col_start = i * (f64::from(sample_rate) / DETAIL_HZ).round() as usize;
-            let col_end = mono
-                .len()
-                .min(col_start + (f64::from(sample_rate) / DETAIL_HZ).round() as usize);
-            let peak = peak_amplitude(&mono[col_start..col_end]);
-            color_detail_column(l, m, h, peak)
+        .map(|(&l, (&m, &h))| (l, m, h))
+        .collect();
+    let heights: Vec<u8> = (0..bands_3tuple.len())
+        .map(|i| {
+            let col_start = i * samples_per_detail;
+            let col_end = mono.len().min(col_start + samples_per_detail);
+            (peak_amplitude(&mono[col_start..col_end]) * 31.0).round() as u8
         })
         .collect();
 
-    // 3-band preview/detail (PWV6/PWV7): reuse the band energies directly.
-    let band3_preview: Vec<Waveform3BandPreviewColumn> = color_preview
-        .iter()
-        .map(|c| Waveform3BandPreviewColumn {
-            energy_mid_third_freq: c.energy_mid_third_freq,
-            energy_top_third_freq: c.energy_top_third_freq,
-            energy_bottom_third_freq: c.energy_bottom_third_freq,
-        })
-        .collect();
-    let band3_detail: Vec<Waveform3BandDetailColumn> = low
-        .iter()
-        .zip(mid.iter().zip(high.iter()))
-        .map(|(&l, (&m, &h))| Waveform3BandDetailColumn {
-            energy_mid_third_freq: m,
-            energy_top_third_freq: h,
-            energy_bottom_third_freq: l,
-        })
-        .collect();
+    let (color_preview, color_detail, band3_preview, band3_detail) =
+        build_band_columns(&bands_3tuple, &heights);
 
     Ok(ComputedAnlz {
         preview_mono,
