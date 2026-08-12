@@ -754,7 +754,6 @@ dependencies = [
  "clap",
  "crc16",
  "cxx",
- "cxx-build",
  "fallible-iterator",
  "glob",
  "image",

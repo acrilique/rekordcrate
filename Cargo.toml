@@ -11,6 +11,11 @@ categories = ["parser-implementations"]
 edition = "2021"
 exclude = [".*"]
 
+[lib]
+# `staticlib` lets a C++ consumer (e.g. libdjinterop via Corrosion) link the
+# crate and generate the cxx headers itself. `rlib` keeps normal Rust consumers.
+crate-type = ["rlib", "staticlib"]
+
 [dependencies]
 binrw = "0.15"
 modular-bitfield = "0.13"
@@ -31,7 +36,6 @@ cxx = { version = "1.0", optional = true }
 
 [build-dependencies]
 glob = "0.3"
-cxx-build = { version = "1.0", optional = true }
 
 [dev-dependencies]
 pretty-hex = "0.4"
@@ -43,7 +47,7 @@ cli = ["dep:clap"]
 xml = ["dep:serde", "dep:serde_repr", "dep:quick-xml", "dep:chrono", "dep:rgb"]
 artwork = ["dep:image"]
 analysis = ["dep:symphonia", "dep:realfft"]
-cpp = ["dep:cxx", "dep:cxx-build"]
+cpp = ["dep:cxx"]
 
 [[bin]]
 name = "rekordcrate"
