@@ -37,8 +37,13 @@ use crate::{
 use std::path::PathBuf;
 
 // Shared types declared inside the bridge mod below resolve to `ffi::*`. Bring
-// them into scope for the shim fns.
-use crate::cpp::ffi::{AddTrackOutcome, ColorIndex, FileType, PlaylistInfo, Rating, Track};
+// them into scope for the shim fns. The four performance-data struct names are
+// only constructed in tests; allow the unused-import lint off-test.
+#[allow(unused_imports)]
+use crate::cpp::ffi::{
+    AddTrackOutcome, BeatgridMarker, ColorIndex, FileType, HotCueFfi, LoopFfi, PerformanceData,
+    PlaylistInfo, Rating, Track, WaveformEntry,
+};
 
 // Bridge module — shared types + extern "Rust" declarations. The shim impls
 // live below as plain free functions; cxx finds them by name.
@@ -90,6 +95,15 @@ pub mod ffi {
         pub color: ColorIndex,
         pub file_type: FileType,
         pub autoload_hotcues: bool,
+        /// Total sample count. Needed by `build_anlz_input` for beatgrid extents
+        /// (clips beats at the track end) and ignored when no performance data.
+        pub sample_count: u64,
+        /// Format-agnostic performance data. When `waveform_detail` is non-empty,
+        /// rekordcrate expands it to a full ANLZ column set. An empty vector
+        /// means "no ANLZ" — use `analysis_source` under the `analysis` feature
+        /// instead. ponytail: cxx can't express `Option<shared_struct>`, so the
+        /// empty `waveform_detail` vector doubles as the presence flag.
+        pub performance: PerformanceData,
     }
 
     /// Outcome of [`writer_add_track`]: a freshly inserted track id, or the
@@ -145,6 +159,80 @@ pub mod ffi {
         Flac,
         Wav,
         Aiff,
+    }
+
+    // ---- Performance data (format-agnostic; rekordcrate owns the ANLZ expansion) ----
+    //
+    // These deliberately mirror libdjinterop's `waveform_entry`/`beatgrid_marker`/
+    // `hot_cue`/`loop` shapes — NOT the 11 ANLZ column types. The caller supplies
+    // one 150 Hz 3-band vector + per-column height; rekordcrate downsamples and
+    // encodes. cxx shared structs cannot hold `Option<f64>`, so `bpm` and
+    // `main_cue_sample` use sentinel values (<= 0.0 means "unset" — both are
+    // strictly positive when present).
+
+    /// One column of 3-band amplitude at the 150 Hz detail rate. Opacity is
+    /// dropped (unused by ANLZ); the height comes in via `PerformanceData::
+    /// waveform_height` since peak amplitude isn't recoverable from band
+    /// energies.
+    pub struct WaveformEntry {
+        pub low: u8,
+        pub mid: u8,
+        pub high: u8,
+    }
+
+    /// Sparse beatgrid anchor: a beat `index` (may be negative — Rekordbox grids
+    /// start at -4) and its `sample_offset`. Two markers bracket a constant-tempo
+    /// segment; rekordcrate densifies to one beat per beat.
+    pub struct BeatgridMarker {
+        pub index: i32,
+        pub sample_offset: f64,
+    }
+
+    /// A hot cue (slot 1-8) or memory cue (slot 0). RGBA color; alpha is dropped
+    /// by the ANLZ encoder (RGB + palette index only).
+    pub struct HotCueFfi {
+        pub index: u32,
+        pub label: String,
+        pub sample_offset: f64,
+        pub r: u8,
+        pub g: u8,
+        pub b: u8,
+        pub a: u8,
+    }
+
+    /// A loop cue. `start`/`end` are sample offsets.
+    pub struct LoopFfi {
+        pub index: u32,
+        pub label: String,
+        pub start: f64,
+        pub end: f64,
+        pub r: u8,
+        pub g: u8,
+        pub b: u8,
+        pub a: u8,
+    }
+
+    /// All performance data for one track, format-agnostic. When present on a
+    /// `Track`, rekordcrate builds the full ANLZ column set (waveforms + beats +
+    /// cues). When `None` (empty `waveform_detail`), no ANLZ is written — the
+    /// `analysis_source` path still works under the `analysis` feature.
+    pub struct PerformanceData {
+        /// 3-band detail at 150 Hz. Length 0 disables ANLZ for this track.
+        pub waveform_detail: Vec<WaveformEntry>,
+        /// Per-column peak height 0-31, parallel to `waveform_detail`. Drives
+        /// PWAV/PWV2/PWV3 and PWV5 height.
+        pub waveform_height: Vec<u8>,
+        /// Sparse beatgrid anchors (typically 2).
+        pub beatgrid: Vec<BeatgridMarker>,
+        /// BPM. `<= 0.0` means unknown — rekordcrate derives it from the first
+        /// beatgrid segment's samples-per-beat instead.
+        pub bpm: f64,
+        /// Hot/memory cues.
+        pub hot_cues: Vec<HotCueFfi>,
+        /// Loops.
+        pub loops: Vec<LoopFfi>,
+        /// Main (downbeat) cue in samples. `< 0.0` means none.
+        pub main_cue_sample: f64,
     }
 
     extern "Rust" {
@@ -251,6 +339,16 @@ fn track_default() -> Track {
         color: d.color.into(),
         file_type: d.file_type.into(),
         autoload_hotcues: d.autoload_hotcues,
+        sample_count: 0,
+        performance: PerformanceData {
+            waveform_detail: Vec::new(),
+            waveform_height: Vec::new(),
+            beatgrid: Vec::new(),
+            bpm: 0.0,
+            hot_cues: Vec::new(),
+            loops: Vec::new(),
+            main_cue_sample: -1.0,
+        },
     }
 }
 
@@ -450,13 +548,22 @@ impl From<FileType> for util::FileType {
 /// Copy the FFI-shaped `Track` into the crate's typed struct. Field-for-field;
 /// the artwork field name follows the `artwork` feature in both structs.
 ///
-/// `analysis` is always `None`: the bridge intentionally does not mirror
-/// `AnlzInput` (11 fields of `crate::anlz` column types) across the boundary.
-/// Under the `analysis` feature, the writer instead computes columns from
-/// `analysis_source`. ponytail: ceiling — a C++ caller cannot supply
-/// pre-computed beats/cues/waveform columns. Upgrade path: mirror the
-/// `crate::anlz` section types as shared enums if a caller ever needs that.
+/// `analysis` is `Some` when the caller supplied a `PerformanceData`: rekordcrate
+/// expands it to a full `AnlzInput` (the 11 ANLZ column types never cross the
+/// boundary). When `None`, the writer falls back to `analysis_source` under the
+/// `analysis` feature, or emits no ANLZ at all.
 fn track_to_native(t: &Track) -> crate::Track {
+    // Empty `waveform_detail` is the "no performance data" sentinel — cxx can't
+    // hold `Option<PerformanceData>`, so an empty vector means emit no ANLZ.
+    let analysis = if t.performance.waveform_detail.is_empty() {
+        None
+    } else {
+        Some(performance_to_anlz(
+            &t.performance,
+            t.sample_rate,
+            t.sample_count,
+        ))
+    };
     crate::Track {
         title: t.title.clone(),
         artist: t.artist.clone(),
@@ -479,7 +586,7 @@ fn track_to_native(t: &Track) -> crate::Track {
         artwork_source: t.artwork_source.clone(),
         #[cfg(not(feature = "artwork"))]
         artwork_device_path: t.artwork_device_path.clone(),
-        analysis: None,
+        analysis,
         #[cfg(feature = "analysis")]
         analysis_source: t.analysis_source.clone(),
         message: t.message.clone(),
@@ -498,6 +605,69 @@ fn track_to_native(t: &Track) -> crate::Track {
         file_type: t.file_type.into(),
         autoload_hotcues: t.autoload_hotcues,
     }
+}
+
+/// Expand the format-agnostic `PerformanceData` into the crate's `AnlzInput`.
+/// This is the bridge between the cxx-shared types and the ANLZ mapping layer in
+/// `device::anlz_build`. Sentinel values (`bpm <= 0`, `main_cue < 0`) become `None`.
+fn performance_to_anlz(
+    p: &PerformanceData,
+    sample_rate: u32,
+    sample_count: u64,
+) -> crate::device::writer::AnlzInput {
+    use crate::device::anlz_build::{build_anlz_input, CueInput};
+
+    let detail: Vec<(u8, u8, u8)> = p
+        .waveform_detail
+        .iter()
+        .map(|e| (e.low, e.mid, e.high))
+        .collect();
+    let beatgrid: Vec<(i32, f64)> = p
+        .beatgrid
+        .iter()
+        .map(|m| (m.index, m.sample_offset))
+        .collect();
+    let bpm = (p.bpm > 0.0).then_some(p.bpm);
+
+    // Flatten hot cues + loops into one cue list. Hot-cue slots come from
+    // `index` (1-8); loops are 0 only if their index is 0, else use the index.
+    let mut cues: Vec<CueInput<'_>> = Vec::with_capacity(p.hot_cues.len() + p.loops.len());
+    for hc in &p.hot_cues {
+        cues.push(CueInput {
+            hot_cue: hc.index,
+            sample_offset: hc.sample_offset,
+            loop_end: None,
+            is_loop: false,
+            label: &hc.label,
+            r: hc.r,
+            g: hc.g,
+            b: hc.b,
+        });
+    }
+    for lp in &p.loops {
+        cues.push(CueInput {
+            hot_cue: lp.index,
+            sample_offset: lp.start,
+            loop_end: Some(lp.end),
+            is_loop: true,
+            label: &lp.label,
+            r: lp.r,
+            g: lp.g,
+            b: lp.b,
+        });
+    }
+    let main_cue = (p.main_cue_sample >= 0.0).then_some(p.main_cue_sample);
+
+    build_anlz_input(
+        &detail,
+        &p.waveform_height,
+        sample_rate,
+        &beatgrid,
+        bpm,
+        &cues,
+        main_cue,
+        sample_count,
+    )
 }
 
 #[cfg(test)]
@@ -565,5 +735,95 @@ mod tests {
         writer_close(w).expect("writer_close");
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The performance-data pipeline: a `PerformanceData` with a waveform +
+    /// beatgrid + hot cue crosses the bridge, the writer emits ANLZ files, and
+    /// the `.DAT` carries a non-empty BeatGrid section. This is the cross-layer
+    /// check that the format-agnostic → ANLZ expansion works through cxx.
+    #[test]
+    fn performance_data_writes_anlz_beatgrid() {
+        let root = unique_tmp("perf");
+        let root_str = root.to_string_lossy().into_owned();
+
+        let mut w = writer_create(root_str.clone()).expect("writer_create");
+        let mut track: Track = track_default();
+        track.file_path = "/Contents/p.mp3".to_string();
+        track.filename = "p.mp3".to_string();
+        track.sample_rate = 44_100;
+        track.sample_count = 44_100; // 1 s
+                                     // 150 Hz over 1 s → 150 detail columns.
+        track.performance.waveform_detail = (0..150)
+            .map(|_| WaveformEntry {
+                low: 40,
+                mid: 80,
+                high: 120,
+            })
+            .collect();
+        track.performance.waveform_height = vec![16; 150];
+        track.performance.bpm = 120.0;
+        track.performance.beatgrid = vec![
+            BeatgridMarker {
+                index: 1,
+                sample_offset: 0.0,
+            },
+            // 120 BPM → 22050 samples/beat; 2 beats span 44100 samples.
+            BeatgridMarker {
+                index: 3,
+                sample_offset: 44_100.0,
+            },
+        ];
+        track.performance.hot_cues.push(HotCueFfi {
+            index: 1,
+            label: "Intro".to_string(),
+            sample_offset: 0.0,
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255,
+        });
+        track.performance.main_cue_sample = 0.0;
+        let outcome = writer_add_track(&mut w, &track).expect("writer_add_track");
+        assert!(outcome.is_new);
+        writer_close(w).expect("writer_close");
+
+        // ANLZ files live under PIONEER/USBANLZ/<derived>/ANLZ0000.*. The writer
+        // derives the intermediate dir from the file_path, so walk the whole tree.
+        let usbanlz = root.join("PIONEER/USBANLZ");
+        assert!(usbanlz.exists(), "USBANALZ dir should exist at {usbanlz:?}");
+        let mut found_dat = false;
+        for entry in walkdir(&usbanlz) {
+            if entry.ends_with("ANLZ0000.DAT") {
+                found_dat = true;
+                let bytes = fs::read(&entry).expect("read DAT");
+                // BeatGrid section content-kind tag is "PQTZ" per the ANLZ format.
+                // ponytail: a raw tag check, not a full parse — the smallest thing that fails
+                // if the beatgrid section wasn't written.
+                assert!(
+                    bytes.windows(4).any(|w| w == b"PQTZ"),
+                    "DAT at {entry:?} should contain a beat-grid (PQTZ) section"
+                );
+            }
+        }
+        assert!(found_dat, "ANLZ0000.DAT should have been written");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Recursively collect every file path under `dir`.
+    fn walkdir(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        let Ok(entries) = fs::read_dir(dir) else {
+            return out;
+        };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                out.extend(walkdir(&p));
+            } else {
+                out.push(p);
+            }
+        }
+        out
     }
 }
