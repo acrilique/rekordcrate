@@ -124,6 +124,8 @@ pub struct DeviceExport {
     tracks_by_path: HashMap<String, u32>,
     /// `id -> is_folder`. Root (id 0) is implicit — always valid as a parent, always a folder.
     playlist_nodes: HashMap<u32, bool>,
+    /// `parent id -> next sort_order` among its children (0-based, as on real exports).
+    next_sort_order: HashMap<u32, u32>,
     /// `playlist id -> next entry_index`.
     next_entry_index: HashMap<u32, u32>,
     artists_by_name: HashMap<String, u32>,
@@ -355,10 +357,16 @@ impl DeviceExport {
             scan_table::<Artwork, _>(&mut db, |row| (row.id.0, text(&row.path)))?;
 
         let mut playlist_nodes = HashMap::new();
+        let mut next_sort_order = HashMap::new();
         let mut next_playlist_node_id = 1;
         db.iter_rows::<PlaylistTreeNode>()?.for_each(|node| {
             playlist_nodes.insert(node.id.0, node.is_folder());
             next_playlist_node_id = next_playlist_node_id.max(node.id.0.saturating_add(1));
+            raise(
+                &mut next_sort_order,
+                node.parent_id.0,
+                node.sort_order.saturating_add(1),
+            );
             Ok(())
         })?;
 
@@ -398,6 +406,7 @@ impl DeviceExport {
             track_ids,
             tracks_by_path,
             playlist_nodes,
+            next_sort_order,
             next_entry_index,
             artists_by_name,
             albums_by_artist_and_name,
@@ -540,7 +549,8 @@ impl DeviceExport {
             .collect()
     }
 
-    /// The playlist tree: the root's folders and playlists, folders carrying their children.
+    /// The playlist tree: the root's folders and playlists, folders carrying their children, each
+    /// level in display order.
     ///
     /// # Errors
     ///
@@ -626,7 +636,7 @@ impl DeviceExport {
         })
     }
 
-    /// Create a playlist folder and return its node ID.
+    /// Create a playlist folder at the end of `parent_id`'s children and return its node ID.
     ///
     /// `parent_id` is [`PlaylistTreeNodeId::root()`] or an existing folder.
     ///
@@ -642,7 +652,7 @@ impl DeviceExport {
         self.create_playlist_node(name, parent_id, true)
     }
 
-    /// Create a playlist and return its node ID.
+    /// Create a playlist at the end of `parent_id`'s children and return its node ID.
     ///
     /// `parent_id` is [`PlaylistTreeNodeId::root()`] or an existing folder.
     ///
@@ -673,17 +683,19 @@ impl DeviceExport {
         }
 
         let id = self.next_playlist_node_id;
+        let sort_order = self.next_sort_order.get(&parent_id.0).copied().unwrap_or(0);
         let node = PlaylistTreeNode::new(
             PlaylistTreeNodeId(id),
             parent_id,
             DeviceSQLString::new(name)?,
             is_folder,
-            0,
+            sort_order,
         );
         self.db
             .add_row(Row::Plain(PlainRow::PlaylistTreeNode(node)))?;
 
         self.next_playlist_node_id += 1;
+        self.next_sort_order.insert(parent_id.0, sort_order + 1);
         self.playlist_nodes.insert(id, is_folder);
 
         Ok(PlaylistTreeNodeId(id))
@@ -1448,6 +1460,43 @@ mod tests {
             ForeignKeyKind::PlaylistNode,
             folder.0,
         );
+    }
+
+    // Siblings are numbered in creation order, per parent, and the numbering carries on after
+    // open(); playlists() returns each level in that order.
+    #[test]
+    fn playlist_nodes_keep_creation_order() {
+        let dir = TestDir::new("playlist-order");
+        let root = PlaylistTreeNodeId::root();
+
+        let mut dev = DeviceExport::create(&dir).unwrap();
+        let folder = dev.create_playlist_folder("Folder", root).unwrap();
+        let a = dev.create_playlist("A", root).unwrap();
+        let inner = dev.create_playlist("Inner", folder).unwrap();
+        dev.save().unwrap();
+
+        let mut dev = DeviceExport::open(&dir).unwrap();
+        let b = dev.create_playlist("B", root).unwrap();
+        dev.save().unwrap();
+
+        let mut dev = DeviceExport::open(&dir).unwrap();
+        let mut sort_orders: Vec<(PlaylistTreeNodeId, u32)> = rows::<PlaylistTreeNode>(&mut dev.db)
+            .iter()
+            .map(|node| (node.id, node.sort_order))
+            .collect();
+        sort_orders.sort_by_key(|&(id, _)| id.0);
+        assert_eq!(sort_orders, [(folder, 0), (a, 1), (inner, 0), (b, 2)]);
+
+        let top_level: Vec<PlaylistTreeNodeId> = dev
+            .playlists()
+            .unwrap()
+            .iter()
+            .map(|node| match node {
+                PlaylistNode::Folder(folder) => folder.id,
+                PlaylistNode::Playlist(playlist) => playlist.id,
+            })
+            .collect();
+        assert_eq!(top_level, [folder, a, b]);
     }
 
     // open() must reuse an existing named row instead of duplicating it.
