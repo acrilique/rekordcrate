@@ -230,7 +230,6 @@ impl<RW: Read + Write + Seek> Database<RW> {
     const PAGE_CHAIN_END: PageIndex = PageIndex(0x03FF_FFFF);
 
     /// Points the previous page's `next_page` field at `current_page_index`.
-    ///
     fn relink_chain_end(
         &mut self,
         previous_page_index: PageIndex,
