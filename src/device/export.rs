@@ -143,7 +143,9 @@ pub struct DeviceExport {
 /// them without rescanning.
 #[derive(Debug, Default)]
 struct TagIndex {
-    /// Next free id; categories and leaves share one id space.
+    /// Every category and leaf id in use; the two share one id space.
+    ids: HashSet<u32>,
+    /// Where [`allocate_id`](Self::allocate_id) resumes its search for a free id.
     next_id: u32,
     /// Category ids, for `add_tags_to_track` foreign-key validation.
     categories: HashSet<u32>,
@@ -164,7 +166,7 @@ impl TagIndex {
         let mut index = Self::default();
 
         ext_db.iter_rows::<TagOrCategory>()?.for_each(|tag| {
-            index.next_id = index.next_id.max(tag.id.0.saturating_add(1));
+            index.ids.insert(tag.id.0);
             index.next_row_index = index
                 .next_row_index
                 .max(u32::from(tag.index_shift) / 0x20 + 1);
@@ -185,10 +187,16 @@ impl TagIndex {
         Ok(index)
     }
 
-    /// Hand out the next tag id. Ids start at 1 because 0 is the null parent.
+    /// Hand out the lowest free tag id. Ids start at 1 because 0 is the null parent. Rekordbox
+    /// gives leaf tags large random ids, so "one past the highest" is not an option here: it
+    /// would overflow on real exports.
     fn allocate_id(&mut self) -> u32 {
-        let id = self.next_id.max(1);
-        self.next_id = id + 1;
+        let mut id = self.next_id.max(1);
+        while self.ids.contains(&id) {
+            id = id.wrapping_add(1).max(1);
+        }
+        self.ids.insert(id);
+        self.next_id = id.wrapping_add(1);
         id
     }
 
