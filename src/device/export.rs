@@ -1158,28 +1158,95 @@ fn tag_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::device::playlist::{Playlist, PlaylistFolder};
+    use crate::util::{ColorIndex, FileType};
 
-    fn test_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "rekordcrate-export-{name}-test-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        dir
+    /// A directory for a test's export: unique per test and per run, absent until the export is
+    /// saved, and removed again when the test ends (pass or fail).
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "rekordcrate-export-{name}-test-{}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&dir);
+            Self(dir)
+        }
+    }
+
+    impl std::ops::Deref for TestDir {
+        type Target = Path;
+
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl AsRef<Path> for TestDir {
+        fn as_ref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A minimal track: a title, and the file name and path derived from it.
+    fn track(name: &str) -> Track {
+        Track {
+            title: name.into(),
+            filename: format!("{name}.mp3"),
+            file_path: format!("/Contents/{name}.mp3"),
+            ..Default::default()
+        }
+    }
+
+    /// All rows of one table, cloned out of the database.
+    fn rows<RowT: RowVariant + Clone>(db: &mut MemoryDatabase) -> Vec<RowT> {
+        db.iter_rows::<RowT>()
+            .unwrap()
+            .map(|row| Ok(row.clone()))
+            .collect()
+            .unwrap()
+    }
+
+    /// The tag and track-tag rows of the `exportExt.pdb` saved under `dir`.
+    fn saved_ext_rows(dir: &Path) -> (Vec<TagOrCategory>, Vec<TrackTag>) {
+        let mut ext_db =
+            read_database(&Layout::new(dir.into()).export_ext_pdb(), DatabaseType::Ext).unwrap();
+        (rows(&mut ext_db), rows(&mut ext_db))
+    }
+
+    fn tag_name(tag: &TagOrCategory) -> String {
+        tag.offsets.inner.name.clone().into_string().unwrap()
+    }
+
+    fn assert_unknown_foreign_key<T: std::fmt::Debug>(
+        result: Result<T>,
+        expected_kind: ForeignKeyKind,
+        expected_id: u32,
+    ) {
+        match result {
+            Err(Error::UnknownForeignKey { kind, id })
+                if kind == expected_kind && id == expected_id => {}
+            other => panic!(
+                "expected an unknown {expected_kind:?} foreign key {expected_id}, got {other:?}"
+            ),
+        }
     }
 
     // Nothing reaches the disk before save(), and dropping an unsaved handle discards it.
     #[test]
     fn nothing_is_written_before_save() {
-        let dir = test_dir("unsaved");
+        let dir = TestDir::new("unsaved");
 
         let mut dev = DeviceExport::create(&dir).unwrap();
-        dev.add_track(&Track {
-            title: "song".into(),
-            file_path: "/Contents/song.mp3".into(),
-            ..Default::default()
-        })
-        .unwrap();
+        dev.add_track(&track("song")).unwrap();
         let cat = dev.create_tag_category("Mood").unwrap();
         assert_eq!(cat, TagCategoryId(1));
         drop(dev);
@@ -1190,15 +1257,10 @@ mod tests {
     // save() lays down the whole export, leaves no temporary files, and can be called again.
     #[test]
     fn save_writes_the_export_and_can_repeat() {
-        let dir = test_dir("save");
+        let dir = TestDir::new("save");
 
         let mut dev = DeviceExport::create(&dir).unwrap();
-        let mk = |n: usize| Track {
-            title: format!("song{n}"),
-            file_path: format!("/Contents/song{n}.mp3"),
-            ..Default::default()
-        };
-        dev.add_track(&mk(0)).unwrap();
+        dev.add_track(&track("song0")).unwrap();
         dev.save().unwrap();
 
         for path in [
@@ -1214,17 +1276,17 @@ mod tests {
         }
         assert_eq!(
             dev.load_settings(),
-            Settings::load(&Layout::new(dir.clone()))
+            Settings::load(&Layout::new(dir.to_path_buf()))
         );
         assert!(dev.load_settings().quantize.is_some());
 
         // The same handle keeps working after a save.
-        dev.add_track(&mk(1)).unwrap();
+        dev.add_track(&track("song1")).unwrap();
         dev.save().unwrap();
 
         let leftovers: Vec<_> = ["PIONEER", "PIONEER/rekordbox"]
             .iter()
-            .flat_map(|sub| std::fs::read_dir(dir.join(sub)).unwrap())
+            .flat_map(|sub| fs::read_dir(dir.join(sub)).unwrap())
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
             .filter(|name| name.ends_with(".tmp"))
             .collect();
@@ -1232,14 +1294,38 @@ mod tests {
 
         let mut dev = DeviceExport::open(&dir).unwrap();
         assert_eq!(dev.tracks().unwrap().len(), 2);
+    }
 
-        let _ = std::fs::remove_dir_all(&dir);
+    // A real Rekordbox export opens, reads back, and can be added to without clashing with what
+    // it already holds. Nothing is saved, so the fixture stays untouched.
+    #[test]
+    fn open_reads_a_rekordbox_export() {
+        let mut dev = DeviceExport::open("data/complete_export/demo_tracks").unwrap();
+
+        let tracks = dev.tracks().unwrap();
+        let titles: Vec<&str> = tracks.iter().map(|(_, t)| t.title.as_str()).collect();
+        assert_eq!(titles, ["Demo Track 1", "Demo Track 2"]);
+        assert!(tracks.iter().all(|(_, t)| t.artist == "Loopmasters"));
+
+        // An existing path is recognised, a new one gets an id past the existing ones.
+        let existing = dev.add_track(&tracks[0].1).unwrap();
+        assert_eq!((existing.id, existing.is_new), (tracks[0].0, false));
+        let added = dev.add_track(&track("new")).unwrap();
+        assert!(added.is_new);
+        assert!(tracks.iter().all(|(id, _)| *id != added.id));
+
+        // Rekordbox gives leaf tags random 32-bit ids; a new category must still get a free one.
+        let existing_tags: Vec<TagOrCategory> = rows(dev.ext_db.as_mut().unwrap());
+        assert!(!existing_tags.is_empty());
+        let cat = dev.create_tag_category("Mine").unwrap();
+        assert!(cat.0 != 0 && existing_tags.iter().all(|tag| tag.id.0 != cat.0));
+        dev.add_tags_to_track(added.id, cat, &["Tag"]).unwrap();
     }
 
     // tracks() hands back what add_track() was given, before and after a save/open round trip.
     #[test]
     fn tracks_read_back_what_was_added() {
-        let dir = test_dir("readback");
+        let dir = TestDir::new("readback");
 
         let full = Track {
             title: "Title".into(),
@@ -1272,8 +1358,8 @@ mod tests {
             year: 2024,
             play_count: 7,
             rating: Rating::Four,
-            color: crate::util::ColorIndex::Green,
-            file_type: crate::util::FileType::Mp3,
+            color: ColorIndex::Green,
+            file_type: FileType::Mp3,
             autoload_hotcues: true,
         };
         // Short enough to need the minimum-row-size padding, which must not leak into `comment`.
@@ -1292,28 +1378,16 @@ mod tests {
         dev.save().unwrap();
         let mut dev = DeviceExport::open(&dir).unwrap();
         assert_eq!(dev.tracks().unwrap(), expected);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // playlists() and playlist_tracks() read back the tree and its entries in playlist order.
     #[test]
     fn playlists_read_back() {
-        use crate::device::playlist::{Playlist, PlaylistFolder};
-
-        let dir = test_dir("playlist-readback");
+        let dir = TestDir::new("playlist-readback");
 
         let mut dev = DeviceExport::create(&dir).unwrap();
         let ids: Vec<TrackId> = (0..3)
-            .map(|n| {
-                dev.add_track(&Track {
-                    title: format!("song{n}"),
-                    file_path: format!("/Contents/song{n}.mp3"),
-                    ..Default::default()
-                })
-                .unwrap()
-                .id
-            })
+            .map(|n| dev.add_track(&track(&format!("song{n}"))).unwrap().id)
             .collect();
         let folder = dev
             .create_playlist_folder("Folder", PlaylistTreeNodeId::root())
@@ -1340,71 +1414,51 @@ mod tests {
             dev.playlist_tracks(playlist).unwrap(),
             vec![ids[2], ids[0], ids[1]]
         );
-        assert!(matches!(
+        assert_unknown_foreign_key(
             dev.playlist_tracks(folder),
-            Err(Error::UnknownForeignKey {
-                kind: ForeignKeyKind::PlaylistNode,
-                ..
-            })
-        ));
-
-        let _ = std::fs::remove_dir_all(&dir);
+            ForeignKeyKind::PlaylistNode,
+            folder.0,
+        );
     }
 
     // open() must reuse an existing named row instead of duplicating it.
     #[test]
     fn open_then_add_does_not_duplicate_named_row() {
-        let dir =
-            std::env::temp_dir().join(format!("rekordcrate-export-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = TestDir::new("named-row-dedup");
 
         let t = Track {
-            title: "song".into(),
             artist: "Dup Artist".into(),
             album: "Dup Album".into(),
             genre: "Dup Genre".into(),
-            filename: "song.mp3".into(),
-            file_path: "/Contents/song.mp3".into(),
-            ..Default::default()
+            ..track("song")
         };
 
         let mut dev = DeviceExport::create(&dir).unwrap();
         dev.add_track(&t).unwrap();
         dev.save().unwrap();
 
+        // A different track by the same artist, so add_track gets as far as resolving names.
         let mut dev = DeviceExport::open(&dir).unwrap();
-        dev.add_track(&t).unwrap();
+        dev.add_track(&Track {
+            file_path: "/Contents/other.mp3".into(),
+            ..t.clone()
+        })
+        .unwrap();
         dev.save().unwrap();
 
-        // Dedup must survive to disk: exactly one "Dup Artist".
+        // Dedup must survive to disk: exactly one row of each.
         let mut dev = DeviceExport::open(&dir).unwrap();
-        let count = dev
-            .db
-            .iter_rows::<crate::pdb::Artist>()
-            .unwrap()
-            .filter(|row| Ok(row.offsets.name.clone().into_string().unwrap() == "Dup Artist"))
-            .count()
-            .unwrap();
-        assert_eq!(count, 1, "open() must not duplicate an existing artist");
-
-        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(rows::<PdbTrack>(&mut dev.db).len(), 2);
+        assert_eq!(rows::<Artist>(&mut dev.db).len(), 1);
+        assert_eq!(rows::<Album>(&mut dev.db).len(), 1);
+        assert_eq!(rows::<Genre>(&mut dev.db).len(), 1);
     }
 
-    // add_track is idempotent on a non-empty file_path, in-session and across open()/close().
+    // add_track is idempotent on a non-empty file_path, in-session and across save()/open().
     #[test]
     fn add_track_dedups_on_file_path() {
-        let dir = std::env::temp_dir().join(format!(
-            "rekordcrate-export-track-dedup-test-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-
-        let t = Track {
-            title: "song".into(),
-            filename: "song.mp3".into(),
-            file_path: "/Contents/song.mp3".into(),
-            ..Default::default()
-        };
+        let dir = TestDir::new("track-dedup");
+        let t = track("song");
 
         let mut dev = DeviceExport::create(&dir).unwrap();
         let first = dev.add_track(&t).unwrap();
@@ -1428,404 +1482,281 @@ mod tests {
         dev.save().unwrap();
 
         let mut dev = DeviceExport::open(&dir).unwrap();
-        let count = dev
-            .db
-            .iter_rows::<crate::pdb::Track>()
-            .unwrap()
-            .count()
-            .unwrap();
-        assert_eq!(count, 1, "dedup must keep exactly one Track row on disk");
+        assert_eq!(
+            rows::<PdbTrack>(&mut dev.db).len(),
+            1,
+            "dedup must keep exactly one Track row on disk"
+        );
+    }
 
-        let _ = std::fs::remove_dir_all(&dir);
+    // Tracks without a file_path have nothing to dedup on, so each add inserts a row.
+    #[test]
+    fn add_track_without_file_path_always_inserts() {
+        let mut dev = DeviceExport::create(TestDir::new("no-path")).unwrap();
+        let t = Track {
+            title: "untitled".into(),
+            ..Default::default()
+        };
+
+        let first = dev.add_track(&t).unwrap();
+        let second = dev.add_track(&t).unwrap();
+        assert!(first.is_new && second.is_new);
+        assert_ne!(first.id, second.id);
+    }
+
+    // The different spellings of a key share one Key row, stored in the canonical form.
+    #[test]
+    fn add_track_dedups_key_spellings() {
+        let mut dev = DeviceExport::create(TestDir::new("key-dedup")).unwrap();
+        for (n, key) in ["A minor", "Am", "Amin"].into_iter().enumerate() {
+            dev.add_track(&Track {
+                key: key.into(),
+                ..track(&format!("song{n}"))
+            })
+            .unwrap();
+        }
+
+        let keys: Vec<String> = rows::<Key>(&mut dev.db)
+            .into_iter()
+            .map(|key| key.name.into_string().unwrap())
+            .collect();
+        assert_eq!(keys, ["Amin"]);
     }
 
     // The playlist methods reject ids that don't reference an existing row.
     #[test]
     fn playlist_methods_reject_unknown_foreign_keys() {
-        let dir =
-            std::env::temp_dir().join(format!("rekordcrate-export-fk-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-
-        let mut dev = DeviceExport::create(&dir).unwrap();
+        let mut dev = DeviceExport::create(TestDir::new("fk")).unwrap();
 
         // parent_id root() is the tree root and always valid.
         let folder = dev
             .create_playlist_folder("Folder", PlaylistTreeNodeId::root())
             .unwrap();
         let playlist = dev.create_playlist("Playlist", folder).unwrap();
+        let track = dev.add_track(&track("song")).unwrap().id;
 
-        // Unknown parent: 999 was never created.
-        let err = dev
-            .create_playlist("Orphan", PlaylistTreeNodeId(999))
-            .unwrap_err();
-        assert!(
-            matches!(err, Error::UnknownForeignKey { kind, id } if kind == ForeignKeyKind::PlaylistNode && id == 999),
-            "unknown parent_id must be rejected, got {err:?}"
+        assert_unknown_foreign_key(
+            dev.create_playlist("Orphan", PlaylistTreeNodeId(999)),
+            ForeignKeyKind::PlaylistNode,
+            999,
         );
-
-        // A valid track so add_track_to_playlist's track check has something to find.
-        let t = Track {
-            title: "song".into(),
-            filename: "song.mp3".into(),
-            file_path: "/Contents/song.mp3".into(),
-            ..Default::default()
-        };
-        let track = dev.add_track(&t).unwrap().id;
-
-        // Unknown playlist id.
-        let err = dev
-            .add_track_to_playlist(PlaylistTreeNodeId(999), track)
-            .unwrap_err();
-        assert!(
-            matches!(err, Error::UnknownForeignKey { kind, id } if kind == ForeignKeyKind::PlaylistNode && id == 999),
-            "unknown playlist_id must be rejected, got {err:?}"
+        assert_unknown_foreign_key(
+            dev.add_track_to_playlist(PlaylistTreeNodeId(999), track),
+            ForeignKeyKind::PlaylistNode,
+            999,
         );
-
-        // Unknown track id.
-        let err = dev
-            .add_track_to_playlist(playlist, TrackId(999))
-            .unwrap_err();
-        assert!(
-            matches!(err, Error::UnknownForeignKey { kind, id } if kind == ForeignKeyKind::Track && id == 999),
-            "unknown track_id must be rejected, got {err:?}"
+        assert_unknown_foreign_key(
+            dev.add_track_to_playlist(playlist, TrackId(999)),
+            ForeignKeyKind::Track,
+            999,
         );
 
         // The happy path still works.
         dev.add_track_to_playlist(playlist, track).unwrap();
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // A playlist id is rejected as a parent (only folders hold children), and a folder id is
     // rejected as an add_track_to_playlist target (only playlists hold tracks).
     #[test]
     fn playlist_tree_enforces_folder_vs_playlist_roles() {
-        let dir = std::env::temp_dir().join(format!(
-            "rekordcrate-export-tree-shape-test-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-
-        let mut dev = DeviceExport::create(&dir).unwrap();
+        let mut dev = DeviceExport::create(TestDir::new("tree-shape")).unwrap();
         let folder = dev
             .create_playlist_folder("Folder", PlaylistTreeNodeId::root())
             .unwrap();
         let playlist = dev.create_playlist("Playlist", folder).unwrap();
+        let track = dev.add_track(&track("song")).unwrap().id;
 
-        // The playlist exists, but it's a leaf, not a folder.
-        let err = dev.create_playlist("Child", playlist).unwrap_err();
-        assert!(
-            matches!(err, Error::UnknownForeignKey { kind, id } if kind == ForeignKeyKind::PlaylistNode && id == playlist.0),
-            "a playlist id must be rejected as a parent, got {err:?}"
+        assert_unknown_foreign_key(
+            dev.create_playlist("Child", playlist),
+            ForeignKeyKind::PlaylistNode,
+            playlist.0,
         );
-
-        // The folder exists, but tracks go into playlists only.
-        let t = Track {
-            title: "song".into(),
-            filename: "song.mp3".into(),
-            file_path: "/Contents/song.mp3".into(),
-            ..Default::default()
-        };
-        let track = dev.add_track(&t).unwrap().id;
-        let err = dev.add_track_to_playlist(folder, track).unwrap_err();
-        assert!(
-            matches!(err, Error::UnknownForeignKey { kind, id } if kind == ForeignKeyKind::PlaylistNode && id == folder.0),
-            "a folder id must be rejected as a track container, got {err:?}"
+        assert_unknown_foreign_key(
+            dev.add_track_to_playlist(folder, track),
+            ForeignKeyKind::PlaylistNode,
+            folder.0,
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // add_track_to_playlist assigns dense entry indices 0,1,2,…, in-session and across
-    // open()/close() (where the counter is rebuilt from existing rows).
+    // add_track_to_playlist assigns dense entry indices 0,1,2,…, in-session and
+    // across save()/open() (where the counter is rebuilt from existing rows).
     #[test]
     fn add_track_to_playlist_auto_indexes() {
-        let dir = std::env::temp_dir().join(format!(
-            "rekordcrate-export-autoindex-test-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-
-        let mk = |i: u32| Track {
-            title: format!("song{i}"),
-            filename: format!("song{i}.mp3"),
-            file_path: format!("/Contents/song{i}.mp3"),
-            ..Default::default()
-        };
+        let dir = TestDir::new("autoindex");
 
         let mut dev = DeviceExport::create(&dir).unwrap();
         let playlist = dev
             .create_playlist("P", PlaylistTreeNodeId::root())
             .unwrap();
-        let t0 = dev.add_track(&mk(0)).unwrap().id;
-        let t1 = dev.add_track(&mk(1)).unwrap().id;
-        let t2 = dev.add_track(&mk(2)).unwrap().id;
-        dev.add_track_to_playlist(playlist, t0).unwrap();
-        dev.add_track_to_playlist(playlist, t1).unwrap();
-        dev.add_track_to_playlist(playlist, t2).unwrap();
+        for n in 0..3 {
+            let id = dev.add_track(&track(&format!("song{n}"))).unwrap().id;
+            dev.add_track_to_playlist(playlist, id).unwrap();
+        }
         dev.save().unwrap();
 
         // After open() the counter is rebuilt, so one more append lands at index 3.
         let mut dev = DeviceExport::open(&dir).unwrap();
-        let t3 = dev.add_track(&mk(3)).unwrap().id;
-        dev.add_track_to_playlist(playlist, t3).unwrap();
+        let id = dev.add_track(&track("song3")).unwrap().id;
+        dev.add_track_to_playlist(playlist, id).unwrap();
         dev.save().unwrap();
 
         let mut dev = DeviceExport::open(&dir).unwrap();
-        let mut indices: Vec<u32> = dev
-            .db
-            .iter_rows::<crate::pdb::PlaylistEntry>()
-            .unwrap()
-            .map(|e| Ok(e.entry_index))
-            .collect()
-            .unwrap();
+        let mut indices: Vec<u32> = rows::<PlaylistEntry>(&mut dev.db)
+            .iter()
+            .map(|entry| entry.entry_index)
+            .collect();
         indices.sort_unstable();
-        assert_eq!(
-            indices,
-            vec![0, 1, 2, 3],
-            "entry indices must be dense from 0"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(indices, [0, 1, 2, 3], "entry indices must be dense from 0");
     }
 
     // A bare title + file_path (well under 221 bytes) must succeed, with the writer growing
     // `comment` with spaces internally.
     #[test]
     fn add_track_auto_pads_under_minimum_row_size() {
-        let dir = std::env::temp_dir().join(format!(
-            "rekordcrate-export-autopad-test-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = TestDir::new("autopad");
 
-        let t = Track {
+        let mut dev = DeviceExport::create(&dir).unwrap();
+        dev.add_track(&Track {
             title: "tiny".into(),
             file_path: "/Contents/tiny.mp3".into(),
             ..Default::default()
-        };
-
-        let mut dev = DeviceExport::create(&dir).unwrap();
-        let outcome = dev.add_track(&t).unwrap();
-        assert!(outcome.is_new, "a fresh track must be flagged new");
-
+        })
+        .unwrap();
         dev.save().unwrap();
+
         let mut dev = DeviceExport::open(&dir).unwrap();
-        let row = dev
-            .db
-            .iter_rows::<crate::pdb::Track>()
-            .unwrap()
-            .find(|row| Ok(row.id == outcome.id))
-            .unwrap()
-            .unwrap();
-        let comment = row.offsets.inner.comment.clone().into_string().unwrap();
+        let row = rows::<PdbTrack>(&mut dev.db).remove(0);
+        let comment = row.offsets.inner.comment.into_string().unwrap();
         assert!(
-            comment.chars().all(|c| c == ' '),
+            !comment.is_empty() && comment.chars().all(|c| c == ' '),
             "auto-pad must grow the comment with spaces only, got {comment:?}"
         );
-        assert!(
-            !comment.is_empty(),
-            "auto-pad must have grown the comment past empty"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // The sharding rule id/20+1, zero-padded to 5 digits, derived from the captured fixtures.
-    #[cfg(feature = "artwork")]
+    // The folder rule id/20+1, zero-padded to 5 digits, derived from the captured fixtures.
     #[test]
-    fn artwork_device_path_sharding() {
+    fn artwork_paths_follow_the_folder_rule() {
+        use crate::device::layout::artwork_folder;
+
         assert_eq!(artwork_folder(1), "00001");
         assert_eq!(artwork_folder(19), "00001");
         assert_eq!(artwork_folder(20), "00002");
         assert_eq!(artwork_folder(39), "00002");
         assert_eq!(artwork_folder(40), "00003");
-        // The PDB path always references the thumbnail under its shard folder.
-        assert_eq!(artwork_device_path(1), "/PIONEER/Artwork/00001/a1.jpg");
+
+        let layout = Layout::new("/usb".into());
+        assert_eq!(
+            layout.artwork_file(20),
+            Path::new("/usb/PIONEER/Artwork/00002/a20.jpg")
+        );
+        assert_eq!(
+            layout.artwork_m_file(20),
+            Path::new("/usb/PIONEER/Artwork/00002/a20_m.jpg")
+        );
+        // The PDB path always references the thumbnail.
+        #[cfg(feature = "artwork")]
         assert_eq!(artwork_device_path(20), "/PIONEER/Artwork/00002/a20.jpg");
     }
 
+    /// Write a `w`×`h` test image to `path`, in the format its extension names.
     #[cfg(feature = "artwork")]
-    fn write_test_jpeg(path: &std::path::Path, w: u32, h: u32) {
+    fn write_test_image(path: &Path, w: u32, h: u32) {
         use image::{ImageBuffer, Rgb, RgbImage};
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
         let img: RgbImage = ImageBuffer::from_fn(w, h, |x, y| {
             Rgb([(x * 10 % 255) as u8, (y * 10 % 255) as u8, 128])
         });
         img.save(path).unwrap();
     }
 
-    // import_artwork queues the source for the sharded dir under both the 80×80 thumbnail name and
-    // the 240×240 medium name, written by save(), and returns the thumbnail path the PDB stores.
+    // import_artwork returns the thumbnail path the PDB stores, and save() writes the source
+    // under it as an 80×80 thumbnail plus a 240×240 medium, whatever the source's size.
     #[cfg(feature = "artwork")]
     #[test]
-    fn add_track_copies_artwork() {
-        let dir = std::env::temp_dir().join(format!(
-            "rekordcrate-export-artwork-copy-test-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
+    fn import_artwork_writes_thumbnail_and_medium() {
+        use image::ImageReader;
 
+        let dir = TestDir::new("artwork-import");
         let src = dir.join("src.png");
-        write_test_jpeg(&src, 200, 200);
+        write_test_image(&src, 200, 120);
 
         let mut dev = DeviceExport::create(&dir).unwrap();
         let artwork_path = dev.import_artwork(&src).unwrap();
-
-        let t = Track {
-            title: "song".into(),
-            filename: "song.mp3".into(),
-            file_path: "/Contents/song.mp3".into(),
-            artwork_path: artwork_path.clone(),
-            ..Default::default()
-        };
-
-        dev.add_track(&t).unwrap();
-        dev.save().unwrap();
+        assert_eq!(artwork_path, "/PIONEER/Artwork/00001/a1.jpg");
+        dev.add_track(&Track {
+            artwork_path,
+            ..track("song")
+        })
+        .unwrap();
 
         let thumb = dir.join("PIONEER/Artwork/00001/a1.jpg");
         let medium = dir.join("PIONEER/Artwork/00001/a1_m.jpg");
-        assert!(thumb.exists(), "thumbnail must be written at {thumb:?}");
-        assert!(medium.exists(), "medium must be written at {medium:?}");
+        assert!(!thumb.exists(), "nothing is written before save()");
+        dev.save().unwrap();
+
+        let dimensions = |path: &Path| ImageReader::open(path).unwrap().into_dimensions().unwrap();
+        assert_eq!(dimensions(&thumb), (80, 80));
+        assert_eq!(dimensions(&medium), (240, 240));
 
         let mut dev = DeviceExport::open(&dir).unwrap();
-        let row = dev
-            .db
-            .iter_rows::<crate::pdb::Artwork>()
-            .unwrap()
-            .find(|_| Ok(true))
-            .unwrap()
-            .unwrap();
-        let path = row.path.clone().into_string().unwrap();
+        let artwork = rows::<Artwork>(&mut dev.db);
+        assert_eq!(artwork.len(), 1);
         assert_eq!(
-            path, "/PIONEER/Artwork/00001/a1.jpg",
+            artwork[0].path.clone().into_string().unwrap(),
+            "/PIONEER/Artwork/00001/a1.jpg",
             "PDB Artwork.path must reference the thumbnail"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // Two tracks sharing one source dedup to a single artwork: one thumbnail, one medium on disk,
-    // one PDB row, and both tracks reference the same artwork id.
+    // one PDB row.
     #[cfg(feature = "artwork")]
     #[test]
-    fn add_track_dedups_artwork_by_source() {
-        let dir = std::env::temp_dir().join(format!(
-            "rekordcrate-export-artwork-dedup-test-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-
+    fn import_artwork_dedups_by_source() {
+        let dir = TestDir::new("artwork-dedup");
         let src = dir.join("cover.png");
-        write_test_jpeg(&src, 100, 100);
+        write_test_image(&src, 100, 100);
 
         let mut dev = DeviceExport::create(&dir).unwrap();
         let artwork_path = dev.import_artwork(&src).unwrap();
-
-        let mk = |n: usize| Track {
-            title: format!("song{n}"),
-            filename: format!("song{n}.mp3"),
-            file_path: format!("/Contents/song{n}.mp3"),
-            artwork_path: artwork_path.clone(),
-            ..Default::default()
-        };
-
-        dev.add_track(&mk(0)).unwrap();
-        dev.add_track(&mk(1)).unwrap();
+        for name in ["song0", "song1"] {
+            dev.add_track(&Track {
+                artwork_path: artwork_path.clone(),
+                ..track(name)
+            })
+            .unwrap();
+        }
         // Importing the same source again reuses the artwork.
         assert_eq!(dev.import_artwork(&src).unwrap(), artwork_path);
         dev.save().unwrap();
 
-        // One shard folder, one thumbnail, one medium.
-        let shard = dir.join("PIONEER/Artwork/00001");
-        let entries: Vec<_> = std::fs::read_dir(&shard)
-            .unwrap()
-            .collect::<std::io::Result<Vec<_>>>()
-            .unwrap();
+        let folder = dir.join("PIONEER/Artwork/00001");
         assert_eq!(
-            entries.len(),
+            fs::read_dir(&folder).unwrap().count(),
             2,
-            "expected exactly thumbnail + medium in {shard:?}"
+            "expected exactly thumbnail + medium in {folder:?}"
         );
 
         let mut dev = DeviceExport::open(&dir).unwrap();
-        let count = dev
-            .db
-            .iter_rows::<crate::pdb::Artwork>()
-            .unwrap()
-            .count()
-            .unwrap();
-        assert_eq!(count, 1, "dedup must keep exactly one Artwork row on disk");
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    // The written files are resized to the Rekordbox dimensions regardless of source size.
-    #[cfg(feature = "artwork")]
-    #[test]
-    fn add_track_artwork_dimensions() {
-        use image::ImageReader;
-
-        let dir = std::env::temp_dir().join(format!(
-            "rekordcrate-export-artwork-dims-test-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-
-        let src = dir.join("cover.png");
-        write_test_jpeg(&src, 200, 200);
-
-        let mut dev = DeviceExport::create(&dir).unwrap();
-        let artwork_path = dev.import_artwork(&src).unwrap();
-
-        let t = Track {
-            title: "song".into(),
-            filename: "song.mp3".into(),
-            file_path: "/Contents/song.mp3".into(),
-            artwork_path: artwork_path.clone(),
-            ..Default::default()
-        };
-
-        dev.add_track(&t).unwrap();
-        dev.save().unwrap();
-
-        let thumb = ImageReader::open(dir.join("PIONEER/Artwork/00001/a1.jpg"))
-            .unwrap()
-            .into_dimensions()
-            .unwrap();
-        assert_eq!(thumb, (80, 80), "thumbnail must be 80×80");
-
-        let medium = ImageReader::open(dir.join("PIONEER/Artwork/00001/a1_m.jpg"))
-            .unwrap()
-            .into_dimensions()
-            .unwrap();
-        assert_eq!(medium, (240, 240), "medium must be 240×240");
-
-        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            rows::<Artwork>(&mut dev.db).len(),
+            1,
+            "dedup must keep exactly one Artwork row on disk"
+        );
     }
 
     // A caller-supplied artwork_path is stored verbatim; no files are written.
     #[test]
     fn artwork_path_is_stored_verbatim_without_copy() {
-        let dir = std::env::temp_dir().join(format!(
-            "rekordcrate-export-artwork-nofeat-test-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-
+        let dir = TestDir::new("artwork-verbatim");
         let caller_path = "/PIONEER/Artwork/00007/a137.jpg";
-        let t = Track {
-            title: "song".into(),
-            filename: "song.mp3".into(),
-            file_path: "/Contents/song.mp3".into(),
-            artwork_path: caller_path.into(),
-            ..Default::default()
-        };
 
         let mut dev = DeviceExport::create(&dir).unwrap();
-        let outcome = dev.add_track(&t).unwrap();
+        dev.add_track(&Track {
+            artwork_path: caller_path.into(),
+            ..track("song")
+        })
+        .unwrap();
         dev.save().unwrap();
 
         // No image files written — they are the caller's responsibility.
@@ -1835,126 +1766,41 @@ mod tests {
         );
 
         let mut dev = DeviceExport::open(&dir).unwrap();
-
-        // The track references the allocated artwork id (not 0). Copy out to end the borrow.
-        let _artwork_id = {
-            let track_row = dev
-                .db
-                .iter_rows::<crate::pdb::Track>()
-                .unwrap()
-                .find(|row| Ok(row.id == outcome.id))
-                .unwrap()
-                .unwrap();
-            assert_ne!(
-                track_row.artwork_id.0, 0,
-                "track must reference the allocated artwork id, not the null id"
-            );
-            track_row.artwork_id.0
-        };
-
-        // One Artwork row; path is the caller's string verbatim.
-        let artwork_rows: Vec<_> = dev
-            .db
-            .iter_rows::<crate::pdb::Artwork>()
-            .unwrap()
-            .collect::<Vec<_>>()
-            .unwrap();
-        assert_eq!(artwork_rows.len(), 1, "one Artwork row must be written");
-        let path = artwork_rows[0].path.clone().into_string().unwrap();
+        let artwork = rows::<Artwork>(&mut dev.db);
+        assert_eq!(artwork.len(), 1, "one Artwork row must be written");
         assert_eq!(
-            path, caller_path,
+            artwork[0].path.clone().into_string().unwrap(),
+            caller_path,
             "Artwork.path must be the caller-supplied string, stored verbatim"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    fn collect_ext_rows(
-        ext_db: &mut Database<impl std::io::Read + std::io::Seek>,
-    ) -> (Vec<TagOrCategory>, Vec<crate::pdb::ext::TrackTag>) {
-        use crate::pdb::ext::{ExtPageType, ExtRow};
-        use fallible_iterator::FallibleIterator;
-
-        let mut tags = Vec::new();
-        let mut track_tags = Vec::new();
-        let mut pages = ext_db
-            .iter_pages(PageType::Ext(ExtPageType::Tag))
-            .expect("Tag pages");
-        while let Some(page) = pages.next().expect("page") {
-            let Some(data) = page.content.as_data() else {
-                continue;
-            };
-            for row in data.rows.values() {
-                if let Row::Ext(ExtRow::Tag(t)) = row {
-                    tags.push(t.clone());
-                }
-            }
-        }
-        let mut pages = ext_db
-            .iter_pages(PageType::Ext(ExtPageType::TrackTag))
-            .expect("TrackTag pages");
-        while let Some(page) = pages.next().expect("page") {
-            let Some(data) = page.content.as_data() else {
-                continue;
-            };
-            for row in data.rows.values() {
-                if let Row::Ext(ExtRow::TrackTag(t)) = row {
-                    track_tags.push(t.clone());
-                }
-            }
-        }
-        (tags, track_tags)
+        assert_eq!(
+            rows::<PdbTrack>(&mut dev.db)[0].artwork_id,
+            artwork[0].id,
+            "the track must reference the artwork row"
+        );
     }
 
     #[test]
     fn tags_not_written_when_unused() {
-        let dir = std::env::temp_dir().join(format!(
-            "rekordcrate-export-tags-none-test-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = TestDir::new("tags-none");
 
         let mut dev = DeviceExport::create(&dir).unwrap();
-        let t = Track {
-            title: "song".into(),
-            filename: "song.mp3".into(),
-            file_path: "/Contents/song.mp3".into(),
-            ..Default::default()
-        };
-        dev.add_track(&t).unwrap();
+        dev.add_track(&track("song")).unwrap();
         dev.save().unwrap();
 
         assert!(
             !dir.join("PIONEER/rekordbox/exportExt.pdb").exists(),
             "no exportExt.pdb must be written when no track has tags"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn add_tags_creates_category_leaves_and_junctions() {
-        let dir = std::env::temp_dir().join(format!(
-            "rekordcrate-export-tags-basic-test-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = TestDir::new("tags-basic");
 
         let mut dev = DeviceExport::create(&dir).unwrap();
-        let t1 = Track {
-            title: "a".into(),
-            filename: "a.mp3".into(),
-            file_path: "/Contents/a.mp3".into(),
-            ..Default::default()
-        };
-        let t2 = Track {
-            title: "b".into(),
-            filename: "b.mp3".into(),
-            file_path: "/Contents/b.mp3".into(),
-            ..Default::default()
-        };
-        let id1 = dev.add_track(&t1).unwrap().id;
-        let id2 = dev.add_track(&t2).unwrap().id;
+        let id1 = dev.add_track(&track("a")).unwrap().id;
+        let id2 = dev.add_track(&track("b")).unwrap().id;
 
         let cat = dev.create_tag_category("My Tags").unwrap();
         dev.add_tags_to_track(id1, cat, &["Techno", "Dub", "Techno"])
@@ -1962,62 +1808,37 @@ mod tests {
         dev.add_tags_to_track(id2, cat, &["Dub", "House"]).unwrap();
         dev.save().unwrap();
 
-        let mut ext_db = Database::open(
-            std::fs::File::open(dir.join("PIONEER/rekordbox/exportExt.pdb")).unwrap(),
-            DatabaseType::Ext,
-        )
-        .unwrap();
-        let (tags, track_tags) = collect_ext_rows(&mut ext_db);
+        let (tags, track_tags) = saved_ext_rows(&dir);
 
         let categories: Vec<_> = tags.iter().filter(|t| t.raw_is_category != 0).collect();
         assert_eq!(categories.len(), 1);
         // Confirmed against a real Rekordbox export: categories are `0x01000000`, not `1`.
         assert_eq!(categories[0].raw_is_category, 0x01000000);
         assert_eq!(categories[0].index_shift, 0x0000);
-        assert_eq!(
-            categories[0]
-                .offsets
-                .inner
-                .name
-                .clone()
-                .into_string()
-                .unwrap(),
-            "My Tags"
-        );
+        assert_eq!(tag_name(categories[0]), "My Tags");
         assert_eq!(categories[0].id.0, cat.0);
         assert_eq!(categories[0].parent_id.0, None);
 
+        // The leaves, in the order they were first used, all under the caller's category. Being
+        // written after the category (row index 0), their `index_shift` carries on from 0x20 in
+        // steps of 0x20 — as on a real Rekordbox export.
         let mut leaves: Vec<_> = tags.iter().filter(|t| t.raw_is_category == 0).collect();
-        assert_eq!(leaves.len(), 3);
-        // Every leaf is a non-category row and lives under the caller's category.
+        leaves.sort_unstable_by_key(|t| t.index_shift);
+        let leaf_fields: Vec<_> = leaves
+            .iter()
+            .map(|t| (tag_name(t), t.position, t.index_shift))
+            .collect();
+        assert_eq!(
+            leaf_fields,
+            [
+                ("Techno".to_string(), 0, 0x20),
+                ("Dub".to_string(), 1, 0x40),
+                ("House".to_string(), 2, 0x60),
+            ]
+        );
         for leaf in &leaves {
-            assert_eq!(leaf.raw_is_category, 0);
             assert_eq!(leaf.parent_id.0.map(NonZero::get), Some(cat.0));
         }
-        let leaf_names: Vec<String> = leaves
-            .iter()
-            .map(|t| t.offsets.inner.name.clone().into_string().unwrap())
-            .collect();
-        for expected in &["Techno", "Dub", "House"] {
-            assert!(
-                leaf_names.iter().any(|n| n == expected),
-                "{expected:?} missing, got {leaf_names:?}"
-            );
-        }
-        // `index_shift` grows by 0x20 per row across all tag rows (category + leaves), in write
-        // order — confirmed against a real Rekordbox export.
-        let mut sorted: Vec<u16> = tags.iter().map(|t| t.index_shift).collect();
-        sorted.sort_unstable();
-        sorted.dedup();
-        assert!(
-            sorted.windows(2).all(|w| w[1] - w[0] == 0x20),
-            "index_shift must step by 0x20 per row, got {sorted:?}"
-        );
-        // Category is written first (row_index 0); leaves follow. Sanity-check the leaf range.
-        leaves.sort_unstable_by_key(|t| t.index_shift);
-        assert_eq!(leaves[0].index_shift, 0x0020);
-        assert_eq!(leaves[1].index_shift, 0x0040);
-        assert_eq!(leaves[2].index_shift, 0x0060);
 
         // t1: 2 tags, t2: 2 tags; the duplicate "Techno" within t1 must not add a junction, and the
         // shared "Dub" must reuse one leaf row.
@@ -2025,121 +1846,56 @@ mod tests {
         for tt in &track_tags {
             assert_eq!(tt.unknown_const, 3);
         }
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn add_tags_rejects_unknown_track() {
-        let dir = std::env::temp_dir().join(format!(
-            "rekordcrate-export-tags-fk-test-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-
-        let mut dev = DeviceExport::create(&dir).unwrap();
+    fn add_tags_rejects_unknown_foreign_keys() {
+        let mut dev = DeviceExport::create(TestDir::new("tags-fk")).unwrap();
+        let id = dev.add_track(&track("a")).unwrap().id;
         let cat = dev.create_tag_category("My Tags").unwrap();
-        let err = dev
-            .add_tags_to_track(TrackId(999), cat, &["x"])
-            .unwrap_err();
-        assert!(
-            matches!(err, Error::UnknownForeignKey { kind, id } if kind == ForeignKeyKind::Track && id == 999),
-            "got {err:?}"
+
+        assert_unknown_foreign_key(
+            dev.add_tags_to_track(TrackId(999), cat, &["x"]),
+            ForeignKeyKind::Track,
+            999,
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn add_tags_rejects_unknown_category() {
-        let dir = std::env::temp_dir().join(format!(
-            "rekordcrate-export-tags-cat-fk-test-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-
-        let mut dev = DeviceExport::create(&dir).unwrap();
-        let t = Track {
-            title: "a".into(),
-            filename: "a.mp3".into(),
-            file_path: "/Contents/a.mp3".into(),
-            ..Default::default()
-        };
-        let id = dev.add_track(&t).unwrap().id;
-
-        let err = dev
-            .add_tags_to_track(id, TagCategoryId(999), &["x"])
-            .unwrap_err();
-        assert!(
-            matches!(err, Error::UnknownForeignKey { kind, id } if kind == ForeignKeyKind::TagCategory && id == 999),
-            "unknown category must be rejected, got {err:?}"
+        assert_unknown_foreign_key(
+            dev.add_tags_to_track(id, TagCategoryId(999), &["x"]),
+            ForeignKeyKind::TagCategory,
+            999,
         );
-        // The track FK is checked before the category FK, so a bad track id reports Track first.
-        let err = dev
-            .add_tags_to_track(TrackId(888), TagCategoryId(999), &["x"])
-            .unwrap_err();
-        assert!(
-            matches!(err, Error::UnknownForeignKey { kind, id } if kind == ForeignKeyKind::Track && id == 888),
-            "track FK must be reported before category FK, got {err:?}"
+        // The track is checked before the category, so a bad track id is reported first.
+        assert_unknown_foreign_key(
+            dev.add_tags_to_track(TrackId(888), TagCategoryId(999), &["x"]),
+            ForeignKeyKind::Track,
+            888,
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn add_tags_ignores_empty_labels() {
-        let dir = std::env::temp_dir().join(format!(
-            "rekordcrate-export-tags-empty-test-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = TestDir::new("tags-empty");
 
         let mut dev = DeviceExport::create(&dir).unwrap();
-        let t = Track {
-            title: "a".into(),
-            filename: "a.mp3".into(),
-            file_path: "/Contents/a.mp3".into(),
-            ..Default::default()
-        };
-        let id = dev.add_track(&t).unwrap().id;
-
-        // No category yet, so the ext PDB must not exist even after an all-empty-labels call.
+        let id = dev.add_track(&track("a")).unwrap().id;
         let cat = dev.create_tag_category("My Tags").unwrap();
         dev.add_tags_to_track(id, cat, &["", ""]).unwrap();
-        // The category write already created exportExt.pdb; count its rows instead of asserting
-        // absence.
         dev.save().unwrap();
-        let mut ext_db = Database::open(
-            std::fs::File::open(dir.join("PIONEER/rekordbox/exportExt.pdb")).unwrap(),
-            DatabaseType::Ext,
-        )
-        .unwrap();
-        let (tags, track_tags) = collect_ext_rows(&mut ext_db);
+
         // Only the category row; no leaves, no junctions.
+        let (tags, track_tags) = saved_ext_rows(&dir);
         assert_eq!(tags.len(), 1);
         assert_eq!(track_tags.len(), 0);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // open() must not truncate exportExt.pdb: prior categories/leaves/junctions survive, and later
     // tag calls append with fresh ids and row indices (no collision).
     #[test]
     fn open_preserves_existing_tags() {
-        let dir = std::env::temp_dir().join(format!(
-            "rekordcrate-export-tags-open-preserve-test-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = TestDir::new("tags-open-preserve");
 
         let mut dev = DeviceExport::create(&dir).unwrap();
-        let t = Track {
-            title: "a".into(),
-            filename: "a.mp3".into(),
-            file_path: "/Contents/a.mp3".into(),
-            ..Default::default()
-        };
-        let id = dev.add_track(&t).unwrap().id;
+        let id = dev.add_track(&track("a")).unwrap().id;
         let cat = dev.create_tag_category("My Tags").unwrap();
         dev.add_tags_to_track(id, cat, &["Techno", "Dub"]).unwrap();
         dev.save().unwrap();
@@ -2151,56 +1907,38 @@ mod tests {
         dev.add_tags_to_track(id, cat2, &["Dark"]).unwrap();
         dev.save().unwrap();
 
-        let mut ext_db = Database::open(
-            std::fs::File::open(dir.join("PIONEER/rekordbox/exportExt.pdb")).unwrap(),
-            DatabaseType::Ext,
-        )
-        .unwrap();
-        let (tags, track_tags) = collect_ext_rows(&mut ext_db);
+        let (tags, track_tags) = saved_ext_rows(&dir);
 
-        // Two categories (My Tags, Mood), no duplicates.
-        let categories: Vec<_> = tags.iter().filter(|t| t.raw_is_category != 0).collect();
-        assert_eq!(categories.len(), 2, "both categories must survive open()");
-        let cat_names: Vec<String> = categories
+        // Two categories, at consecutive positions.
+        let mut categories: Vec<_> = tags
             .iter()
-            .map(|t| t.offsets.inner.name.clone().into_string().unwrap())
+            .filter(|t| t.raw_is_category != 0)
+            .map(|t| (t.position, tag_name(t)))
             .collect();
-        assert!(cat_names.iter().any(|n| n == "My Tags"));
-        assert!(cat_names.iter().any(|n| n == "Mood"));
+        categories.sort();
+        assert_eq!(
+            categories,
+            [(0, "My Tags".to_string()), (1, "Mood".to_string())]
+        );
 
-        // The three original leaves plus the two new ones (House, Dark); the pre-existing "Techno"
-        // and "Dub" must not have been duplicated.
-        let leaves: Vec<String> = tags
+        // The two original leaves plus the two new ones (House, Dark); the pre-existing "Dub"
+        // must not have been duplicated.
+        let mut leaves: Vec<String> = tags
             .iter()
             .filter(|t| t.raw_is_category == 0)
-            .map(|t| t.offsets.inner.name.clone().into_string().unwrap())
+            .map(tag_name)
             .collect();
-        for expected in &["Techno", "Dub", "House", "Dark"] {
-            assert_eq!(
-                leaves.iter().filter(|n| *n == expected).count(),
-                1,
-                "leaf {expected:?} must appear exactly once, got {leaves:?}"
-            );
-        }
+        leaves.sort();
+        assert_eq!(leaves, ["Dark", "Dub", "House", "Techno"]);
 
         // TrackTag junctions: 2 from the first session + 1 (House) + 1 (Dark) = 4.
         assert_eq!(track_tags.len(), 4);
 
         // No two Tag rows share an id or an index_shift (would mean a counter wasn't recovered).
-        let mut ids: Vec<u32> = tags.iter().map(|t| t.id.0).collect();
-        ids.sort_unstable();
-        let id_dupes = ids.windows(2).any(|w| w[0] == w[1]);
-        assert!(!id_dupes, "tag ids collided after open(): {ids:?}");
-        let mut shifts: Vec<u16> = tags.iter().map(|t| t.index_shift).collect();
-        shifts.sort_unstable();
-        shifts.dedup();
-        assert_eq!(
-            shifts.len(),
-            tags.len(),
-            "index_shift values must be unique, got {shifts:?}"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
+        let ids: HashSet<u32> = tags.iter().map(|t| t.id.0).collect();
+        assert_eq!(ids.len(), tags.len(), "tag ids collided after open()");
+        let shifts: HashSet<u16> = tags.iter().map(|t| t.index_shift).collect();
+        assert_eq!(shifts.len(), tags.len(), "index_shift values collided");
     }
 
     // Focused self-check for the two tag_row encodings confirmed against a real Rekordbox export:
