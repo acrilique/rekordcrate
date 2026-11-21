@@ -126,7 +126,7 @@ pub struct DeviceExport {
     playlist_nodes: HashMap<u32, bool>,
     /// `parent id -> next sort_order` among its children (0-based, as on real exports).
     next_sort_order: HashMap<u32, u32>,
-    /// `playlist id -> next entry_index`.
+    /// `playlist id -> next entry_index` (1-based, as on real exports).
     next_entry_index: HashMap<u32, u32>,
     artists_by_name: HashMap<String, u32>,
     albums_by_artist_and_name: HashMap<(u32, String), u32>,
@@ -720,7 +720,7 @@ impl DeviceExport {
             .next_entry_index
             .get(&playlist_id.0)
             .copied()
-            .unwrap_or(0);
+            .unwrap_or(1);
         let entry = PlaylistEntry {
             entry_index,
             track_id,
@@ -1656,8 +1656,8 @@ mod tests {
         );
     }
 
-    // add_track_to_playlist assigns dense entry indices 0,1,2,…, in-session and
-    // across save()/open() (where the counter is rebuilt from existing rows).
+    // add_track_to_playlist assigns dense entry indices 1,2,3,… like Rekordbox does, in-session
+    // and across save()/open() (where the counter is rebuilt from existing rows).
     #[test]
     fn add_track_to_playlist_auto_indexes() {
         let dir = TestDir::new("autoindex");
@@ -1672,7 +1672,7 @@ mod tests {
         }
         dev.save().unwrap();
 
-        // After open() the counter is rebuilt, so one more append lands at index 3.
+        // After open() the counter is rebuilt, so one more append lands at index 4.
         let mut dev = DeviceExport::open(&dir).unwrap();
         let id = dev.add_track(&track("song3")).unwrap().id;
         dev.add_track_to_playlist(playlist, id).unwrap();
@@ -1684,7 +1684,7 @@ mod tests {
             .map(|entry| entry.entry_index)
             .collect();
         indices.sort_unstable();
-        assert_eq!(indices, [0, 1, 2, 3], "entry indices must be dense from 0");
+        assert_eq!(indices, [1, 2, 3, 4], "entry indices must be dense from 1");
     }
 
     // A bare title + file_path (well under 221 bytes) must succeed, with the writer growing
