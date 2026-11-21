@@ -26,7 +26,7 @@ pub const DAT_FILES: &[(&str, SettingType)] = &[
 /// Exposed so expert callers can locate [`Self::export_pdb`] / [`Self::export_ext_pdb`] and the
 /// surrounding `PIONEER` / `Contents` directories directly, for manual inspection or modification
 /// outside the high-level [`crate::device::DeviceExport`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Layout {
     root: PathBuf,
 }
@@ -94,15 +94,13 @@ impl Layout {
         self.pioneer_dir().join(filename)
     }
 
-    /// The `PIONEER/Artwork` directory (under the `artwork` feature).
-    #[cfg(feature = "artwork")]
+    /// The `PIONEER/Artwork` directory holding track artwork.
     #[must_use]
     pub fn artwork_dir(&self) -> PathBuf {
         self.pioneer_dir().join("Artwork")
     }
 
-    /// Path to the 80×80 thumbnail `a{id}.jpg` (under the `artwork` feature).
-    #[cfg(feature = "artwork")]
+    /// Path to the 80×80 thumbnail `a{id}.jpg` of artwork `id`, the file an `Artwork` row names.
     #[must_use]
     pub fn artwork_file(&self, id: u32) -> PathBuf {
         self.artwork_dir()
@@ -110,8 +108,8 @@ impl Layout {
             .join(format!("a{id}.jpg"))
     }
 
-    /// Path to the 240×240 `a{id}_m.jpg` (under the `artwork` feature).
-    #[cfg(feature = "artwork")]
+    /// Path to the 240×240 `a{id}_m.jpg` of artwork `id`, which players look for next to the
+    /// thumbnail.
     #[must_use]
     pub fn artwork_m_file(&self, id: u32) -> PathBuf {
         self.artwork_dir()
@@ -120,9 +118,7 @@ impl Layout {
     }
 }
 
-/// Five-digit shard folder name for artwork `id`: `id/20 + 1`, zero-padded. This is compiled even
-/// without the `artwork` feature, as the only thing the feature enables is converting and copying
-/// artwork files to their destination.
+/// Five-digit folder name Rekordbox files artwork `id` under: `id / 20 + 1`, zero-padded.
 #[must_use]
 pub fn artwork_folder(id: u32) -> String {
     format!("{:05}", id / 20 + 1)
