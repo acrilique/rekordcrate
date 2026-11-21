@@ -225,7 +225,9 @@ impl Track {
 /// are not resolved — different spellings of the same pitch still create distinct rows.
 pub(crate) fn canonical_key_name(name: &str) -> String {
     let trimmed = name.trim();
-    let lower = trimmed.to_lowercase();
+    // ASCII-only, so `lower` stays byte-for-byte aligned with `trimmed` (full Unicode lowercasing
+    // can change a character's length). The tokens below are all ASCII anyway.
+    let lower = trimmed.to_ascii_lowercase();
     let mut out = String::with_capacity(trimmed.len());
     let mut i = 0;
     while i < lower.len() {
@@ -295,6 +297,13 @@ mod tests {
         assert_eq!(canonical_key_name("B flat minor"), "Bbmin");
         assert_eq!(canonical_key_name("F\u{266f}m"), "F#min");
         assert_eq!(canonical_key_name("F sharp Minor"), "F#min");
+    }
+
+    #[test]
+    fn test_canonical_key_name_non_ascii() {
+        // Characters whose lowercase form has a different byte length must pass through intact.
+        assert_eq!(canonical_key_name("\u{130}maj"), "\u{130}maj");
+        assert_eq!(canonical_key_name("\u{1e9e} minor"), "\u{1e9e}min");
     }
 
     #[test]
