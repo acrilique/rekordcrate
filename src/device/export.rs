@@ -45,7 +45,7 @@
 //! `DeviceExport::import_artwork`, which decodes and resizes a host-side image (80×80 + 240×240)
 //! into `PIONEER/Artwork/{folder}/` and returns the device path to put in that field.
 //!
-//! See [`crate::device::layout`].
+//! [`Layout`] describes where each of the export's files lives on the device.
 
 #[cfg(feature = "artwork")]
 use crate::device::layout::artwork_folder;
@@ -59,25 +59,22 @@ use crate::pdb::ext::{
 use crate::pdb::io::Database;
 use crate::pdb::offset_array::OffsetArrayContainer;
 use crate::pdb::string::DeviceSQLString;
-use crate::pdb::Artwork;
 use crate::pdb::{
-    AlbumId, ArtistId, ArtworkId, DatabaseType, GenreId, KeyId, LabelId, PageType, PlainPageType,
-    PlainRow, PlaylistEntry, PlaylistTreeNode, PlaylistTreeNodeId, Row, RowVariant, Subtype,
-    Track as PdbTrack, TrackId,
+    Album, AlbumId, Artist, ArtistId, Artwork, ArtworkId, DatabaseType, Genre, GenreId, Key, KeyId,
+    Label, LabelId, PageType, PlainPageType, PlainRow, PlaylistEntry, PlaylistTreeNode,
+    PlaylistTreeNodeId, Row, RowVariant, Subtype, Track as PdbTrack, TrackId, TrailingName,
 };
 use crate::setting::{Setting, SettingType};
-use crate::util::{MaybeCalculated, Rating};
+use crate::util::{ForeignKeyKind, MaybeCalculated, Rating};
 use crate::{Error, Result};
 use binrw::BinWrite;
 use fallible_iterator::FallibleIterator;
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::hash::Hash;
 use std::io::{Cursor, Write};
 use std::num::NonZero;
 use std::path::{Path, PathBuf};
-
-/// Re-export of [`crate::util::ForeignKeyKind`], for callers reaching it via this module.
-pub use crate::util::ForeignKeyKind;
 
 /// A PDB database held entirely in memory; [`DeviceExport::save`] writes its image out.
 type MemoryDatabase = Database<Cursor<Vec<u8>>>;
@@ -123,33 +120,84 @@ pub struct DeviceExport {
     next_label_id: u32,
     next_artwork_id: u32,
     next_playlist_node_id: u32,
-    // Shared id space for categories and leaf tags; 0 is the null foreign key, so both start at 1.
-    next_tag_id: u32,
-    /// Next `position` for a top-level category (0-based, as on real exports).
-    next_category_position: u32,
-    /// Per-row monotonic counter driving `index_shift` (`0x20`/row).
-    next_tag_row_index: u32,
     track_ids: HashSet<u32>,
+    tracks_by_path: HashMap<String, u32>,
     /// `id -> is_folder`. Root (id 0) is implicit — always valid as a parent, always a folder.
     playlist_nodes: HashMap<u32, bool>,
-    tracks_by_path: HashMap<String, u32>,
-    playlist_entry_counts: HashMap<u32, u32>,
+    /// `playlist id -> next entry_index`.
+    next_entry_index: HashMap<u32, u32>,
     artists_by_name: HashMap<String, u32>,
     albums_by_artist_and_name: HashMap<(u32, String), u32>,
     genres_by_name: HashMap<String, u32>,
     keys_by_canonical: HashMap<String, u32>,
     labels_by_name: HashMap<String, u32>,
-    /// Created tag category ids, for `add_tags_to_track` FK validation.
-    tag_categories: HashSet<u32>,
-    /// `(category_id, label) -> tag id` leaf dedup.
-    tags_by_key: HashMap<(u32, String), u32>,
-    /// `category_id -> next leaf position` (dense from 0 within a category).
-    tag_leaf_counts: HashMap<u32, u32>,
     /// `Artwork.path -> id`.
     artwork_by_path: HashMap<String, u32>,
     /// Host-side source -> device path, so importing the same image twice reuses one artwork.
     #[cfg(feature = "artwork")]
     artwork_by_source: HashMap<PathBuf, String>,
+    tags: TagIndex,
+}
+
+/// What the handle remembers about the tag tables of `exportExt.pdb`, so tag calls can append to
+/// them without rescanning.
+#[derive(Debug, Default)]
+struct TagIndex {
+    /// Next free id; categories and leaves share one id space.
+    next_id: u32,
+    /// Category ids, for `add_tags_to_track` foreign-key validation.
+    categories: HashSet<u32>,
+    /// `(category id, label) -> leaf id`.
+    leaves: HashMap<(u32, String), u32>,
+    /// Next `position` for a category (0-based, as on real exports).
+    next_category_position: u32,
+    /// `category id -> next leaf position` (dense from 0 within a category).
+    next_leaf_position: HashMap<u32, u32>,
+    /// Per-row counter driving `index_shift` (`0x20` per row).
+    next_row_index: u32,
+}
+
+impl TagIndex {
+    /// Rebuild the index from an existing ext PDB, so later tag calls append to it instead of
+    /// colliding with (or duplicating) what is already there.
+    fn scan(ext_db: &mut MemoryDatabase) -> Result<Self> {
+        let mut index = Self::default();
+
+        ext_db.iter_rows::<TagOrCategory>()?.for_each(|tag| {
+            index.next_id = index.next_id.max(tag.id.0.saturating_add(1));
+            index.next_row_index = index
+                .next_row_index
+                .max(u32::from(tag.index_shift) / 0x20 + 1);
+            let next_position = tag.position.saturating_add(1);
+            if tag.raw_is_category != 0 {
+                index.categories.insert(tag.id.0);
+                index.next_category_position = index.next_category_position.max(next_position);
+            } else {
+                let category = tag.parent_id.0.map_or(0, NonZero::get);
+                if let Ok(label) = tag.offsets.inner.name.clone().into_string() {
+                    index.leaves.entry((category, label)).or_insert(tag.id.0);
+                }
+                raise(&mut index.next_leaf_position, category, next_position);
+            }
+            Ok(())
+        })?;
+
+        Ok(index)
+    }
+
+    /// Hand out the next tag id. Ids start at 1 because 0 is the null parent.
+    fn allocate_id(&mut self) -> u32 {
+        let id = self.next_id.max(1);
+        self.next_id = id + 1;
+        id
+    }
+
+    /// Hand out the next row index (see [`tag_row`]).
+    fn allocate_row_index(&mut self) -> u32 {
+        let row_index = self.next_row_index;
+        self.next_row_index += 1;
+        row_index
+    }
 }
 
 /// Id-derived `Artwork.path`: `/PIONEER/Artwork/{folder}/a{id}.jpg` (thumbnail; `_m` not tracked).
@@ -226,14 +274,14 @@ impl DeviceExport {
 
     /// Open an existing device export at the given path, loading its databases into memory.
     ///
-    /// Scans for the highest IDs in each table category to continue adding rows with
-    /// non-conflicting IDs. Tag categories/leaves are recovered from `exportExt.pdb` the same
-    /// way; if that file is absent it is created on the first tag call, as in
-    /// [`create`](Self::create).
+    /// Scans the tables for their highest ids, so rows added later get ids that do not conflict,
+    /// and for the names already present, so they are reused rather than duplicated. Tags are
+    /// recovered from `exportExt.pdb` the same way; if that file is absent it is created on the
+    /// first tag call, as in [`create`](Self::create).
     ///
     /// # Errors
     ///
-    /// If the PDB cannot be read or the table scanning fails.
+    /// If a PDB file cannot be read or parsed.
     pub fn open(device_root: impl AsRef<Path>) -> Result<Self> {
         let layout = Layout::new(device_root.as_ref().to_path_buf());
         let db = read_database(&layout.export_pdb(), DatabaseType::Plain)?;
@@ -247,119 +295,73 @@ impl DeviceExport {
     }
 
     /// Build the handle around loaded (or freshly created) databases, scanning them for the
-    /// next free ids and the dedup indices.
+    /// next free ids and the dedup indices that keep later lookups O(1).
     fn from_databases(
         layout: Layout,
         mut db: MemoryDatabase,
         mut ext_db: Option<MemoryDatabase>,
     ) -> Result<Self> {
-        // Each table's next free ID is one past the highest existing ID (0 when empty). We also
-        // rebuild the in-memory dedup/index maps so add_track stays O(1) per lookup.
+        // A name that cannot be decoded is left out of its index: the row keeps its id, it just
+        // cannot be found (and so reused) by name.
+        let text = |string: &DeviceSQLString| string.clone().into_string().ok();
+
         let mut track_ids = HashSet::new();
         let mut tracks_by_path = HashMap::new();
-        let next_track_id = db.iter_rows::<crate::pdb::Track>()?.fold(0u32, |max, t| {
-            track_ids.insert(t.id.0);
-            if let Ok(path) = t.offsets.inner.file_path.clone().into_string() {
-                if !path.is_empty() {
-                    tracks_by_path.entry(path).or_insert(t.id.0);
-                }
+        let mut next_track_id = 1;
+        db.iter_rows::<PdbTrack>()?.for_each(|track| {
+            track_ids.insert(track.id.0);
+            next_track_id = next_track_id.max(track.id.0.saturating_add(1));
+            if let Some(path) = text(&track.offsets.file_path).filter(|path| !path.is_empty()) {
+                tracks_by_path.entry(path).or_insert(track.id.0);
             }
-            Ok(max.max(t.id.0))
-        })? + 1;
-
-        let mut artists_by_name = HashMap::new();
-        let next_artist_id = db.iter_rows::<crate::pdb::Artist>()?.fold(0u32, |max, a| {
-            if let Ok(name) = a.offsets.name.clone().into_string() {
-                artists_by_name.entry(name).or_insert(a.id.0);
-            }
-            Ok(max.max(a.id.0))
-        })? + 1;
-
-        let mut albums_by_artist_and_name = HashMap::new();
-        let next_album_id = db.iter_rows::<crate::pdb::Album>()?.fold(0u32, |max, a| {
-            if let Ok(name) = a.offsets.name.clone().into_string() {
-                albums_by_artist_and_name
-                    .entry((a.artist_id.0, name))
-                    .or_insert(a.id.0);
-            }
-            Ok(max.max(a.id.0))
-        })? + 1;
-
-        let mut genres_by_name = HashMap::new();
-        let next_genre_id = db.iter_rows::<crate::pdb::Genre>()?.fold(0u32, |max, g| {
-            if let Ok(name) = g.name.clone().into_string() {
-                genres_by_name.entry(name).or_insert(g.id.0);
-            }
-            Ok(max.max(g.id.0))
-        })? + 1;
-
-        let mut keys_by_canonical = HashMap::new();
-        let next_key_id = db.iter_rows::<crate::pdb::Key>()?.fold(0u32, |max, k| {
-            if let Ok(name) = k.name.clone().into_string() {
-                // Index under canonical form so later lookups collide.
-                keys_by_canonical
-                    .entry(canonical_key_name(&name))
-                    .or_insert(k.id.0);
-            }
-            Ok(max.max(k.id.0))
-        })? + 1;
-
-        let mut labels_by_name = HashMap::new();
-        let next_label_id = db.iter_rows::<crate::pdb::Label>()?.fold(0u32, |max, l| {
-            if let Ok(name) = l.name.clone().into_string() {
-                labels_by_name.entry(name).or_insert(l.id.0);
-            }
-            Ok(max.max(l.id.0))
-        })? + 1;
-
-        let mut artwork_by_path = HashMap::new();
-        let next_artwork_id = db
-            .iter_rows::<crate::pdb::Artwork>()?
-            .fold(0u32, |max, a| {
-                if let Ok(path) = a.path.clone().into_string() {
-                    artwork_by_path.entry(path).or_insert(a.id.0);
-                }
-                Ok(max.max(a.id.0))
-            })?
-            + 1;
-
-        let mut playlist_nodes = HashMap::new();
-        let next_playlist_node_id =
-            db.iter_rows::<crate::pdb::PlaylistTreeNode>()?
-                .fold(0u32, |max, p| {
-                    playlist_nodes.insert(p.id.0, p.is_folder());
-                    Ok(max.max(p.id.0))
-                })?
-                + 1;
-
-        // `max(entry_index) + 1` (not row count) so a reopened export with sparse indices doesn't
-        // collide with an existing index.
-        let mut playlist_entry_counts: HashMap<u32, u32> = HashMap::new();
-        db.iter_rows::<crate::pdb::PlaylistEntry>()?.for_each(|e| {
-            let entry = playlist_entry_counts.entry(e.playlist_id.0).or_insert(0);
-            *entry = (*entry).max(e.entry_index + 1);
             Ok(())
         })?;
 
-        // Recover tag state from the ext PDB so later tag calls append to it. Without one the
-        // maps stay empty and the first tag call creates it.
-        let mut tag_categories = HashSet::new();
-        let mut tags_by_key = HashMap::new();
-        let mut tag_leaf_counts = HashMap::new();
-        let mut next_category_position = 0u32;
-        let mut next_tag_id = 1u32;
-        let mut next_tag_row_index = 0u32;
-        if let Some(ext_db) = ext_db.as_mut() {
-            scan_ext_tags(
-                ext_db,
-                &mut tag_categories,
-                &mut tags_by_key,
-                &mut tag_leaf_counts,
-                &mut next_category_position,
-                &mut next_tag_id,
-                &mut next_tag_row_index,
-            )?;
-        }
+        let (next_artist_id, artists_by_name) =
+            scan_table::<Artist, _>(&mut db, |row| (row.id.0, text(&row.offsets.name)))?;
+        let (next_album_id, albums_by_artist_and_name) = scan_table::<Album, _>(&mut db, |row| {
+            let key = text(&row.offsets.name).map(|name| (row.artist_id.0, name));
+            (row.id.0, key)
+        })?;
+        let (next_genre_id, genres_by_name) =
+            scan_table::<Genre, _>(&mut db, |row| (row.id.0, text(&row.name)))?;
+        // Indexed under the canonical form, so every spelling of a key finds the same row.
+        let (next_key_id, keys_by_canonical) = scan_table::<Key, _>(&mut db, |row| {
+            (
+                row.id.0,
+                text(&row.name).map(|name| canonical_key_name(&name)),
+            )
+        })?;
+        let (next_label_id, labels_by_name) =
+            scan_table::<Label, _>(&mut db, |row| (row.id.0, text(&row.name)))?;
+        let (next_artwork_id, artwork_by_path) =
+            scan_table::<Artwork, _>(&mut db, |row| (row.id.0, text(&row.path)))?;
+
+        let mut playlist_nodes = HashMap::new();
+        let mut next_playlist_node_id = 1;
+        db.iter_rows::<PlaylistTreeNode>()?.for_each(|node| {
+            playlist_nodes.insert(node.id.0, node.is_folder());
+            next_playlist_node_id = next_playlist_node_id.max(node.id.0.saturating_add(1));
+            Ok(())
+        })?;
+
+        // One past the highest index rather than the row count, so sparse indices in an existing
+        // export are never reused.
+        let mut next_entry_index = HashMap::new();
+        db.iter_rows::<PlaylistEntry>()?.for_each(|entry| {
+            raise(
+                &mut next_entry_index,
+                entry.playlist_id.0,
+                entry.entry_index.saturating_add(1),
+            );
+            Ok(())
+        })?;
+
+        // Without an ext PDB the index stays empty and the first tag call creates the file.
+        let tags = match ext_db.as_mut() {
+            Some(ext_db) => TagIndex::scan(ext_db)?,
+            None => TagIndex::default(),
+        };
 
         Ok(Self {
             layout,
@@ -376,24 +378,19 @@ impl DeviceExport {
             next_label_id,
             next_artwork_id,
             next_playlist_node_id,
-            next_tag_id,
-            next_category_position,
-            next_tag_row_index,
             track_ids,
-            playlist_nodes,
             tracks_by_path,
-            playlist_entry_counts,
+            playlist_nodes,
+            next_entry_index,
             artists_by_name,
             albums_by_artist_and_name,
             genres_by_name,
             keys_by_canonical,
             labels_by_name,
-            tag_categories,
-            tags_by_key,
-            tag_leaf_counts,
             artwork_by_path,
             #[cfg(feature = "artwork")]
             artwork_by_source: HashMap::new(),
+            tags,
         })
     }
 
@@ -469,8 +466,6 @@ impl DeviceExport {
     ///
     /// If a page cannot be parsed or a string cannot be decoded.
     pub fn tracks(&mut self) -> Result<Vec<(TrackId, Track)>> {
-        use crate::pdb::{Album, Artist, Genre, Key, Label};
-
         let db = &mut self.db;
         let artists = names_by_id::<Artist>(db, |r| (r.id.0, &r.offsets.name))?;
         let albums = names_by_id::<Album>(db, |r| (r.id.0, &r.offsets.name))?;
@@ -544,12 +539,7 @@ impl DeviceExport {
     /// [`Error::UnknownForeignKey`] if `playlist_id` isn't an existing *playlist* (folders hold
     /// no tracks), or if a page cannot be parsed.
     pub fn playlist_tracks(&mut self, playlist_id: PlaylistTreeNodeId) -> Result<Vec<TrackId>> {
-        if self.playlist_nodes.get(&playlist_id.0) != Some(&false) {
-            return Err(Error::UnknownForeignKey {
-                kind: ForeignKeyKind::PlaylistNode,
-                id: playlist_id.0,
-            });
-        }
+        self.require_playlist(playlist_id)?;
         let mut entries: Vec<(u32, TrackId)> = self
             .db
             .iter_rows::<PlaylistEntry>()?
@@ -570,14 +560,14 @@ impl DeviceExport {
     /// new row is inserted. Tracks with an empty `file_path` are always inserted. Use
     /// [`AddTrackOutcome::is_new`] to tell the cases apart.
     ///
-    /// Pads `comment` with spaces if the row would fall under Rekordbox's 221-byte minimum.
+    /// Pads `comment` with spaces if the row would fall under the 221-byte minimum some players
+    /// need (see [`Track::comment`]).
     ///
     /// # Errors
     ///
-    /// If any of the track's strings cannot be encoded.
-    ///
-    /// The track's own strings are encoded before any IDs are allocated or rows inserted, so a
-    /// bad one leaves the export untouched.
+    /// If any of the track's strings cannot be encoded. The strings stored in the track row
+    /// itself are encoded before any id is allocated or row inserted, so a bad one leaves the
+    /// export untouched.
     pub fn add_track(&mut self, track: &Track) -> Result<AddTrackOutcome> {
         if !track.file_path.is_empty() {
             if let Some(&id) = self.tracks_by_path.get(&track.file_path) {
@@ -590,45 +580,23 @@ impl DeviceExport {
 
         let mut pdb_track = track.to_row()?;
 
+        // An empty name resolves to id 0, the null foreign key.
         let artist_id = self.get_or_create_artist(&track.artist)?;
-        let album_id = self.get_or_create_album(&track.album, artist_id)?;
-        let genre_id = self.get_or_create_genre(&track.genre)?;
-        let key_id = self.get_or_create_key(&track.key)?;
-        let label_id = self.get_or_create_label(&track.label)?;
-        let artwork_id = self.get_or_create_artwork(&track.artwork_path)?;
-
-        let composer_id = if track.composer.is_empty() {
-            0
-        } else {
-            self.get_or_create_artist(&track.composer)?
-        };
-        let orig_artist_id = if track.orig_artist.is_empty() {
-            0
-        } else {
-            self.get_or_create_artist(&track.orig_artist)?
-        };
-        let remixer_id = if track.remixer.is_empty() {
-            0
-        } else {
-            self.get_or_create_artist(&track.remixer)?
-        };
+        pdb_track.artist_id = ArtistId(artist_id);
+        pdb_track.album_id = AlbumId(self.get_or_create_album(&track.album, artist_id)?);
+        pdb_track.genre_id = GenreId(self.get_or_create_genre(&track.genre)?);
+        pdb_track.key_id = KeyId(self.get_or_create_key(&track.key)?);
+        pdb_track.label_id = LabelId(self.get_or_create_label(&track.label)?);
+        pdb_track.artwork_id = ArtworkId(self.get_or_create_artwork(&track.artwork_path)?);
+        pdb_track.composer_id = ArtistId(self.get_or_create_artist(&track.composer)?);
+        pdb_track.orig_artist_id = ArtistId(self.get_or_create_artist(&track.orig_artist)?);
+        pdb_track.remixer_id = ArtistId(self.get_or_create_artist(&track.remixer)?);
 
         let track_id = self.next_track_id;
-        self.next_track_id += 1;
-
         pdb_track.id = TrackId(track_id);
-        pdb_track.artist_id = ArtistId(artist_id);
-        pdb_track.album_id = AlbumId(album_id);
-        pdb_track.genre_id = GenreId(genre_id);
-        pdb_track.key_id = KeyId(key_id);
-        pdb_track.label_id = LabelId(label_id);
-        pdb_track.artwork_id = ArtworkId(artwork_id);
-        pdb_track.composer_id = ArtistId(composer_id);
-        pdb_track.orig_artist_id = ArtistId(orig_artist_id);
-        pdb_track.remixer_id = ArtistId(remixer_id);
-
         self.db.add_row(Row::Plain(PlainRow::Track(pdb_track)))?;
 
+        self.next_track_id += 1;
         self.track_ids.insert(track_id);
         if !track.file_path.is_empty() {
             self.tracks_by_path
@@ -643,8 +611,7 @@ impl DeviceExport {
 
     /// Create a playlist folder and return its node ID.
     ///
-    /// `parent_id` is [`PlaylistTreeNodeId::root()`] or an existing folder created by
-    /// [`create_playlist_folder`](Self::create_playlist_folder).
+    /// `parent_id` is [`PlaylistTreeNodeId::root()`] or an existing folder.
     ///
     /// # Errors
     ///
@@ -660,8 +627,7 @@ impl DeviceExport {
 
     /// Create a playlist and return its node ID.
     ///
-    /// `parent_id` is [`PlaylistTreeNodeId::root()`] or an existing folder created by
-    /// [`create_playlist_folder`](Self::create_playlist_folder).
+    /// `parent_id` is [`PlaylistTreeNodeId::root()`] or an existing folder.
     ///
     /// # Errors
     ///
@@ -680,22 +646,16 @@ impl DeviceExport {
         parent_id: PlaylistTreeNodeId,
         is_folder: bool,
     ) -> Result<PlaylistTreeNodeId> {
-        if parent_id.0 != 0
-            && !self
-                .playlist_nodes
-                .get(&parent_id.0)
-                .copied()
-                .unwrap_or(false)
+        if parent_id != PlaylistTreeNodeId::root()
+            && self.playlist_nodes.get(&parent_id.0) != Some(&true)
         {
-            return Err(Error::UnknownForeignKey {
-                kind: ForeignKeyKind::PlaylistNode,
-                id: parent_id.0,
-            });
+            return Err(unknown_foreign_key(
+                ForeignKeyKind::PlaylistNode,
+                parent_id.0,
+            ));
         }
 
         let id = self.next_playlist_node_id;
-        self.next_playlist_node_id += 1;
-
         let node = PlaylistTreeNode::new(
             PlaylistTreeNodeId(id),
             parent_id,
@@ -703,16 +663,17 @@ impl DeviceExport {
             is_folder,
             0,
         );
-
         self.db
             .add_row(Row::Plain(PlainRow::PlaylistTreeNode(node)))?;
 
+        self.next_playlist_node_id += 1;
         self.playlist_nodes.insert(id, is_folder);
 
         Ok(PlaylistTreeNodeId(id))
     }
 
     /// Append a track to the end of a playlist. The entry position is assigned automatically.
+    /// A track may appear in a playlist more than once.
     ///
     /// # Errors
     ///
@@ -723,42 +684,23 @@ impl DeviceExport {
         playlist_id: PlaylistTreeNodeId,
         track_id: TrackId,
     ) -> Result<()> {
-        if !self
-            .playlist_nodes
-            .get(&playlist_id.0)
-            .copied()
-            .map(|is_folder| !is_folder)
-            .unwrap_or(false)
-        {
-            return Err(Error::UnknownForeignKey {
-                kind: ForeignKeyKind::PlaylistNode,
-                id: playlist_id.0,
-            });
-        }
-        if !self.track_ids.contains(&track_id.0) {
-            return Err(Error::UnknownForeignKey {
-                kind: ForeignKeyKind::Track,
-                id: track_id.0,
-            });
-        }
+        self.require_playlist(playlist_id)?;
+        self.require_track(track_id)?;
 
         let entry_index = self
-            .playlist_entry_counts
+            .next_entry_index
             .get(&playlist_id.0)
             .copied()
             .unwrap_or(0);
-
         let entry = PlaylistEntry {
             entry_index,
             track_id,
             playlist_id,
         };
-
         self.db
             .add_row(Row::Plain(PlainRow::PlaylistEntry(entry)))?;
 
-        self.playlist_entry_counts
-            .insert(playlist_id.0, entry_index + 1);
+        self.next_entry_index.insert(playlist_id.0, entry_index + 1);
 
         Ok(())
     }
@@ -769,67 +711,50 @@ impl DeviceExport {
     ///
     /// # Errors
     ///
-    /// [`Error`] if the name can't be encoded or the row can't be written.
+    /// If the name can't be encoded.
     pub fn create_tag_category(&mut self, name: &str) -> Result<TagCategoryId> {
-        let id = self.next_tag_id;
-        self.next_tag_id += 1;
-        let position = self.next_category_position;
-        self.next_category_position += 1;
-
-        let row_index = self.next_tag_row_index;
-        self.next_tag_row_index += 1;
-        self.ext_db_mut()?.add_row(Row::Ext(ExtRow::Tag(tag_row(
+        let id = self.tags.allocate_id();
+        let row = tag_row(
             ParentId(None),
-            position,
+            self.tags.next_category_position,
             TagId(id),
             true,
-            row_index,
+            self.tags.allocate_row_index(),
             name,
-        )?)))?;
+        )?;
+        self.ext_db_mut()?.add_row(Row::Ext(ExtRow::Tag(row)))?;
 
-        self.tag_categories.insert(id);
+        self.tags.next_category_position += 1;
+        self.tags.categories.insert(id);
         Ok(TagCategoryId(id))
     }
 
-    /// Associate `tags` with `track_id` under `category` in `exportExt.pdb`. Empty labels are
-    /// dropped; duplicate labels (within this call or already existing under the same category)
-    /// collapse to one leaf row, so each `(category, label)` pair produces at most one junction
-    /// row per track. The ext PDB is created lazily on first use, and written by [`save`](Self::save).
+    /// Tag `track_id` with `tags` under `category` in `exportExt.pdb`.
+    ///
+    /// Empty labels are skipped, as is a label repeated within the call. A label that already
+    /// exists under the category reuses its tag instead of creating another. The ext PDB is
+    /// created lazily on first use, and written by [`save`](Self::save).
     ///
     /// # Errors
     ///
-    /// [`Error::UnknownForeignKey`] if `track_id` isn't an existing track or `category` isn't a
-    /// category created by [`create_tag_category`](Self::create_tag_category), or [`Error`] if a
-    /// string can't be encoded.
+    /// [`Error::UnknownForeignKey`] if `track_id` isn't an existing track or `category` isn't an
+    /// existing category, or another [`Error`] if a label can't be encoded.
     pub fn add_tags_to_track(
         &mut self,
         track_id: TrackId,
         category: TagCategoryId,
         tags: &[impl AsRef<str>],
     ) -> Result<()> {
-        if !self.track_ids.contains(&track_id.0) {
-            return Err(Error::UnknownForeignKey {
-                kind: ForeignKeyKind::Track,
-                id: track_id.0,
-            });
-        }
-        if !self.tag_categories.contains(&category.0) {
-            return Err(Error::UnknownForeignKey {
-                kind: ForeignKeyKind::TagCategory,
-                id: category.0,
-            });
-        }
-        let mut seen: HashSet<&str> = HashSet::new();
-        let non_empty: Vec<&str> = tags
-            .iter()
-            .map(AsRef::as_ref)
-            .filter(|label| !label.is_empty() && seen.insert(label))
-            .collect();
-        if non_empty.is_empty() {
-            return Ok(());
+        self.require_track(track_id)?;
+        if !self.tags.categories.contains(&category.0) {
+            return Err(unknown_foreign_key(ForeignKeyKind::TagCategory, category.0));
         }
 
-        for label in non_empty {
+        let mut seen = HashSet::new();
+        for label in tags.iter().map(AsRef::as_ref) {
+            if label.is_empty() || !seen.insert(label) {
+                continue;
+            }
             let tag_id = self.get_or_create_tag(category, label)?;
             self.ext_db_mut()?
                 .add_row(Row::Ext(ExtRow::TrackTag(TrackTag {
@@ -845,75 +770,91 @@ impl DeviceExport {
     /// `category` and remember it.
     fn get_or_create_tag(&mut self, category: TagCategoryId, label: &str) -> Result<u32> {
         let key = (category.0, label.to_string());
-        if let Some(&id) = self.tags_by_key.get(&key) {
+        if let Some(&id) = self.tags.leaves.get(&key) {
             return Ok(id);
         }
 
-        let id = self.next_tag_id;
-        self.next_tag_id += 1;
-        let position = self.tag_leaf_counts.get(&category.0).copied().unwrap_or(0);
-        self.tag_leaf_counts.insert(category.0, position + 1);
-
-        let row_index = self.next_tag_row_index;
-        self.next_tag_row_index += 1;
-        self.ext_db_mut()?.add_row(Row::Ext(ExtRow::Tag(tag_row(
+        let id = self.tags.allocate_id();
+        let position = self
+            .tags
+            .next_leaf_position
+            .get(&category.0)
+            .copied()
+            .unwrap_or(0);
+        let row = tag_row(
             ParentId(NonZero::new(category.0)),
             position,
             TagId(id),
             false,
-            row_index,
+            self.tags.allocate_row_index(),
             label,
-        )?)))?;
+        )?;
+        self.ext_db_mut()?.add_row(Row::Ext(ExtRow::Tag(row)))?;
 
-        self.tags_by_key.insert(key, id);
+        self.tags
+            .next_leaf_position
+            .insert(category.0, position + 1);
+        self.tags.leaves.insert(key, id);
         Ok(id)
     }
 
     /// The in-memory `exportExt.pdb`, for a mutation: created empty if the export has none, and
     /// marked for the next [`save`](Self::save).
     fn ext_db_mut(&mut self) -> Result<&mut MemoryDatabase> {
-        self.ext_dirty = true;
-        if self.ext_db.is_none() {
-            let table_page_types = [
-                PageType::Ext(ExtPageType::Tag),
-                PageType::Ext(ExtPageType::TrackTag),
-            ];
-            self.ext_db = Some(Database::create(
+        let ext_db = match self.ext_db.take() {
+            Some(ext_db) => ext_db,
+            None => Database::create(
                 Cursor::new(Vec::new()),
                 DatabaseType::Ext,
-                &table_page_types,
-            )?);
-        }
-        Ok(self
-            .ext_db
-            .as_mut()
-            .expect("ext_db was just initialized above"))
+                &[
+                    PageType::Ext(ExtPageType::Tag),
+                    PageType::Ext(ExtPageType::TrackTag),
+                ],
+            )?,
+        };
+        self.ext_dirty = true;
+        Ok(self.ext_db.insert(ext_db))
     }
 
-    fn get_or_create<K, RowFn>(
+    /// [`Error::UnknownForeignKey`] unless `id` is an existing track.
+    fn require_track(&self, id: TrackId) -> Result<()> {
+        if self.track_ids.contains(&id.0) {
+            Ok(())
+        } else {
+            Err(unknown_foreign_key(ForeignKeyKind::Track, id.0))
+        }
+    }
+
+    /// [`Error::UnknownForeignKey`] unless `id` is an existing playlist (not a folder).
+    fn require_playlist(&self, id: PlaylistTreeNodeId) -> Result<()> {
+        if self.playlist_nodes.get(&id.0) == Some(&false) {
+            Ok(())
+        } else {
+            Err(unknown_foreign_key(ForeignKeyKind::PlaylistNode, id.0))
+        }
+    }
+
+    /// Resolve `key` to the id of its row in a dimension table, inserting the row `build` makes
+    /// on first use. An empty key resolves to id 0, the null foreign key, without a row.
+    fn get_or_create<K: Eq + Hash>(
         db: &mut MemoryDatabase,
-        map: &mut HashMap<K, u32>,
+        ids_by_key: &mut HashMap<K, u32>,
         next_id: &mut u32,
         key: K,
         key_empty: bool,
-        build: RowFn,
-    ) -> Result<u32>
-    where
-        K: Eq + std::hash::Hash + Clone,
-        RowFn: FnOnce(u32, &K) -> Result<Row>,
-    {
+        build: impl FnOnce(u32, &K) -> Result<Row>,
+    ) -> Result<u32> {
         if key_empty {
             return Ok(0);
         }
-        if let Some(&id) = map.get(&key) {
+        if let Some(&id) = ids_by_key.get(&key) {
             return Ok(id);
         }
 
         let id = *next_id;
+        db.add_row(build(id, &key)?)?;
         *next_id += 1;
-        let row = build(id, &key)?;
-        db.add_row(row)?;
-        map.insert(key.clone(), id);
+        ids_by_key.insert(key, id);
         Ok(id)
     }
 
@@ -925,13 +866,13 @@ impl DeviceExport {
             name.to_string(),
             name.is_empty(),
             |id, name| {
-                Ok(Row::Plain(PlainRow::Artist(crate::pdb::Artist {
-                    subtype: crate::pdb::Subtype(0x60),
+                Ok(Row::Plain(PlainRow::Artist(Artist {
+                    subtype: Subtype(0x60),
                     index_shift: 0,
-                    id: crate::pdb::ArtistId(id),
+                    id: ArtistId(id),
                     offsets: OffsetArrayContainer {
                         offsets: MaybeCalculated::Calculated,
-                        inner: crate::pdb::TrailingName {
+                        inner: TrailingName {
                             name: DeviceSQLString::new(name)?,
                         },
                     },
@@ -947,17 +888,17 @@ impl DeviceExport {
             &mut self.next_album_id,
             (artist_id, name.to_string()),
             name.is_empty(),
-            |id, (artist, name): &(u32, String)| {
-                Ok(Row::Plain(PlainRow::Album(crate::pdb::Album {
-                    subtype: crate::pdb::Subtype(0x80),
+            |id, (artist_id, name)| {
+                Ok(Row::Plain(PlainRow::Album(Album {
+                    subtype: Subtype(0x80),
                     index_shift: 0,
                     unknown2: 0,
-                    artist_id: crate::pdb::ArtistId(*artist),
-                    id: crate::pdb::AlbumId(id),
+                    artist_id: ArtistId(*artist_id),
+                    id: AlbumId(id),
                     unknown3: 0,
                     offsets: OffsetArrayContainer {
                         offsets: MaybeCalculated::Calculated,
-                        inner: crate::pdb::TrailingName {
+                        inner: TrailingName {
                             name: DeviceSQLString::new(name)?,
                         },
                     },
@@ -974,8 +915,8 @@ impl DeviceExport {
             name.to_string(),
             name.is_empty(),
             |id, name| {
-                Ok(Row::Plain(PlainRow::Genre(crate::pdb::Genre {
-                    id: crate::pdb::GenreId(id),
+                Ok(Row::Plain(PlainRow::Genre(Genre {
+                    id: GenreId(id),
                     name: DeviceSQLString::new(name)?,
                 })))
             },
@@ -983,24 +924,24 @@ impl DeviceExport {
     }
 
     fn get_or_create_key(&mut self, name: &str) -> Result<u32> {
-        let canonical = canonical_key_name(name);
         Self::get_or_create(
             &mut self.db,
             &mut self.keys_by_canonical,
             &mut self.next_key_id,
-            canonical.clone(),
+            canonical_key_name(name),
             name.is_empty(),
-            |id, _canonical| {
-                // Store the canonical form so future lookups collide.
-                let key_name = if canonical.is_empty() {
+            |id, canonical| {
+                // Store the canonical form, so the name reads back the way it is indexed. A name
+                // that folds to nothing (whitespace only) is kept as given.
+                let name = if canonical.is_empty() {
                     name
                 } else {
-                    &canonical
+                    canonical
                 };
-                Ok(Row::Plain(PlainRow::Key(crate::pdb::Key {
-                    id: crate::pdb::KeyId(id),
+                Ok(Row::Plain(PlainRow::Key(Key {
+                    id: KeyId(id),
                     id2: id,
-                    name: DeviceSQLString::new(key_name)?,
+                    name: DeviceSQLString::new(name)?,
                 })))
             },
         )
@@ -1014,8 +955,8 @@ impl DeviceExport {
             name.to_string(),
             name.is_empty(),
             |id, name| {
-                Ok(Row::Plain(PlainRow::Label(crate::pdb::Label {
-                    id: crate::pdb::LabelId(id),
+                Ok(Row::Plain(PlainRow::Label(Label {
+                    id: LabelId(id),
                     name: DeviceSQLString::new(name)?,
                 })))
             },
@@ -1024,23 +965,19 @@ impl DeviceExport {
 
     /// Resolve an `Artwork.path` to its row id, inserting the row on first use.
     fn get_or_create_artwork(&mut self, path: &str) -> Result<u32> {
-        if path.is_empty() {
-            return Ok(0);
-        }
-        if let Some(&id) = self.artwork_by_path.get(path) {
-            return Ok(id);
-        }
-
-        let row = Row::Plain(PlainRow::Artwork(Artwork {
-            id: ArtworkId(self.next_artwork_id),
-            path: DeviceSQLString::new(path)?,
-        }));
-        self.db.add_row(row)?;
-
-        let id = self.next_artwork_id;
-        self.next_artwork_id += 1;
-        self.artwork_by_path.insert(path.to_string(), id);
-        Ok(id)
+        Self::get_or_create(
+            &mut self.db,
+            &mut self.artwork_by_path,
+            &mut self.next_artwork_id,
+            path.to_string(),
+            path.is_empty(),
+            |id, path| {
+                Ok(Row::Plain(PlainRow::Artwork(Artwork {
+                    id: ArtworkId(id),
+                    path: DeviceSQLString::new(path)?,
+                })))
+            },
+        )
     }
 
     /// Import a host-side image as track artwork and return the device path to put in
@@ -1098,46 +1035,34 @@ impl DeviceExport {
     }
 }
 
-/// Walk the Tag rows of an existing ext PDB and rebuild the writer's in-memory tag state so later
-/// tag calls append without id/row-index collision or truncating prior rows. Mirrors the manual
-/// page walk in the tag tests because `TagOrCategory` does not implement `RowVariant`.
-///
-/// TrackTag junction rows carry no state the writer tracks (their ids reference tag rows already
-/// counted here), so they are not scanned.
-fn scan_ext_tags(
-    ext_db: &mut MemoryDatabase,
-    tag_categories: &mut HashSet<u32>,
-    tags_by_key: &mut HashMap<(u32, String), u32>,
-    tag_leaf_counts: &mut HashMap<u32, u32>,
-    next_category_position: &mut u32,
-    next_tag_id: &mut u32,
-    next_tag_row_index: &mut u32,
-) -> Result<()> {
-    let mut pages = ext_db.iter_pages(PageType::Ext(ExtPageType::Tag))?;
-    while let Some(page) = pages.next()? {
-        let Some(data) = page.content.as_data() else {
-            continue;
-        };
-        for row in data.rows.values() {
-            let Row::Ext(ExtRow::Tag(t)) = row else {
-                continue;
-            };
-            *next_tag_id = (*next_tag_id).max(t.id.0 + 1);
-            *next_tag_row_index = (*next_tag_row_index).max(u32::from(t.index_shift) / 0x20 + 1);
-            let parent = t.parent_id.0.map(NonZero::get).unwrap_or(0);
-            if t.raw_is_category != 0 {
-                tag_categories.insert(t.id.0);
-                *next_category_position = (*next_category_position).max(t.position + 1);
-            } else {
-                if let Ok(name) = t.offsets.inner.name.clone().into_string() {
-                    tags_by_key.entry((parent, name)).or_insert(t.id.0);
-                }
-                let count = tag_leaf_counts.entry(parent).or_insert(0);
-                *count = (*count).max(t.position + 1);
-            }
+fn unknown_foreign_key(kind: ForeignKeyKind, id: u32) -> Error {
+    Error::UnknownForeignKey { kind, id }
+}
+
+/// Raise `map[key]` to at least `value`.
+fn raise(map: &mut HashMap<u32, u32>, key: u32, value: u32) {
+    let current = map.entry(key).or_insert(0);
+    *current = (*current).max(value);
+}
+
+/// Scan one dimension table for its next free id (one past the highest, and at least 1 because 0
+/// is the null foreign key) and a `key -> id` index of its rows. `entry` returns a row's id and
+/// its key, or no key to leave the row out of the index; the first row wins a duplicated key.
+fn scan_table<RowT: RowVariant, K: Eq + Hash>(
+    db: &mut MemoryDatabase,
+    entry: impl Fn(&RowT) -> (u32, Option<K>),
+) -> Result<(u32, HashMap<K, u32>)> {
+    let mut next_id = 1;
+    let mut ids_by_key = HashMap::new();
+    db.iter_rows::<RowT>()?.for_each(|row| {
+        let (id, key) = entry(row);
+        next_id = next_id.max(id.saturating_add(1));
+        if let Some(key) = key {
+            ids_by_key.entry(key).or_insert(id);
         }
-    }
-    Ok(())
+        Ok(())
+    })?;
+    Ok((next_id, ids_by_key))
 }
 
 /// Serialize a setting file.
@@ -1199,8 +1124,10 @@ fn names_by_id<RowT: RowVariant>(
 /// Build a category or leaf tag row. `is_category` selects the `raw_is_category` flag
 /// (`0x01000000` for categories, `0` for leaves — confirmed against a real Rekordbox export).
 /// `row_index` is the per-row monotonic counter that drives `index_shift` (`0x20` per row, as
-/// observed on real exports). Leaf tag ids are sequential here, not the large random 32-bit values
-/// Rekordbox writes — unknown whether players care; revisit if round-trip fidelity is needed.
+/// observed on real exports; the field is 16 bits wide, so it wraps after 2048 rows).
+///
+/// Leaf tag ids are small sequential numbers here, not the large random 32-bit values Rekordbox
+/// writes. Whether any player cares is unknown.
 fn tag_row(
     parent_id: ParentId,
     position: u32,
@@ -1211,7 +1138,7 @@ fn tag_row(
 ) -> Result<TagOrCategory> {
     Ok(TagOrCategory {
         subtype: Subtype(0x0680),
-        index_shift: (row_index * 0x20) as u16,
+        index_shift: (row_index.wrapping_mul(0x20)) as u16,
         unknown1: 0,
         unknown2: 0,
         parent_id,
