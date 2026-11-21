@@ -157,6 +157,8 @@ struct TagIndex {
     next_leaf_position: HashMap<u32, u32>,
     /// Per-row counter driving `index_shift` (`0x20` per row).
     next_row_index: u32,
+    /// The `(track id, tag id)` junction rows, so a tag is linked to a track only once.
+    track_tags: HashSet<(u32, u32)>,
 }
 
 impl TagIndex {
@@ -181,6 +183,13 @@ impl TagIndex {
                 }
                 raise(&mut index.next_leaf_position, category, next_position);
             }
+            Ok(())
+        })?;
+
+        ext_db.iter_rows::<TrackTag>()?.for_each(|track_tag| {
+            index
+                .track_tags
+                .insert((track_tag.track_id.0, track_tag.tag_id.0));
             Ok(())
         })?;
 
@@ -739,9 +748,10 @@ impl DeviceExport {
 
     /// Tag `track_id` with `tags` under `category` in `exportExt.pdb`.
     ///
-    /// Empty labels are skipped, as is a label repeated within the call. A label that already
-    /// exists under the category reuses its tag instead of creating another. The ext PDB is
-    /// created lazily on first use, and written by [`save`](Self::save).
+    /// Empty labels are skipped. A label that already exists under the category reuses its tag
+    /// instead of creating another, and a tag the track already carries is not linked again, so
+    /// repeating a label (in this call, an earlier one, or before [`open`](Self::open)) changes
+    /// nothing. The ext PDB is created lazily on first use, and written by [`save`](Self::save).
     ///
     /// # Errors
     ///
@@ -758,18 +768,21 @@ impl DeviceExport {
             return Err(unknown_foreign_key(ForeignKeyKind::TagCategory, category.0));
         }
 
-        let mut seen = HashSet::new();
         for label in tags.iter().map(AsRef::as_ref) {
-            if label.is_empty() || !seen.insert(label) {
+            if label.is_empty() {
                 continue;
             }
             let tag_id = self.get_or_create_tag(category, label)?;
+            if self.tags.track_tags.contains(&(track_id.0, tag_id)) {
+                continue;
+            }
             self.ext_db_mut()?
                 .add_row(Row::Ext(ExtRow::TrackTag(TrackTag {
                     track_id,
                     tag_id: TagId(tag_id),
                     unknown_const: 3,
                 })))?;
+            self.tags.track_tags.insert((track_id.0, tag_id));
         }
         Ok(())
     }
@@ -1856,6 +1869,32 @@ mod tests {
         }
     }
 
+    // Tagging a track with a tag it already carries adds no second junction row, whether the
+    // first one came from the same call, an earlier call, or an export opened from disk.
+    #[test]
+    fn add_tags_links_a_tag_to_a_track_once() {
+        let dir = TestDir::new("tags-once");
+
+        let mut dev = DeviceExport::create(&dir).unwrap();
+        let id = dev.add_track(&track("a")).unwrap().id;
+        let cat = dev.create_tag_category("My Tags").unwrap();
+        dev.add_tags_to_track(id, cat, &["Dub", "Dub"]).unwrap();
+        dev.add_tags_to_track(id, cat, &["Dub"]).unwrap();
+        dev.save().unwrap();
+
+        let mut dev = DeviceExport::open(&dir).unwrap();
+        dev.add_tags_to_track(id, cat, &["Dub"]).unwrap();
+        assert!(
+            !dev.ext_dirty,
+            "a no-op tag call must not dirty the ext PDB"
+        );
+        dev.save().unwrap();
+
+        let (tags, track_tags) = saved_ext_rows(&dir);
+        assert_eq!(tags.len(), 2, "one category and one leaf");
+        assert_eq!(track_tags.len(), 1, "one junction row");
+    }
+
     #[test]
     fn add_tags_rejects_unknown_foreign_keys() {
         let mut dev = DeviceExport::create(TestDir::new("tags-fk")).unwrap();
@@ -1910,7 +1949,7 @@ mod tests {
 
         // Reopen and append a new leaf under the existing category plus a brand-new category.
         let mut dev = DeviceExport::open(&dir).unwrap();
-        dev.add_tags_to_track(id, cat, &["House"]).unwrap();
+        dev.add_tags_to_track(id, cat, &["House", "Dub"]).unwrap();
         let cat2 = dev.create_tag_category("Mood").unwrap();
         dev.add_tags_to_track(id, cat2, &["Dark"]).unwrap();
         dev.save().unwrap();
