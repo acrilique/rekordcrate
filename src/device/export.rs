@@ -805,7 +805,7 @@ impl DeviceExport {
         &mut self,
         track_id: TrackId,
         category: TagCategoryId,
-        tags: &[String],
+        tags: &[impl AsRef<str>],
     ) -> Result<()> {
         if !self.track_ids.contains(&track_id.0) {
             return Err(Error::UnknownForeignKey {
@@ -822,7 +822,7 @@ impl DeviceExport {
         let mut seen: HashSet<&str> = HashSet::new();
         let non_empty: Vec<&str> = tags
             .iter()
-            .map(String::as_str)
+            .map(AsRef::as_ref)
             .filter(|label| !label.is_empty() && seen.insert(label))
             .collect();
         if non_empty.is_empty() {
@@ -2030,10 +2030,9 @@ mod tests {
         let id2 = dev.add_track(&t2).unwrap().id;
 
         let cat = dev.create_tag_category("My Tags").unwrap();
-        dev.add_tags_to_track(id1, cat, &["Techno".into(), "Dub".into(), "Techno".into()])
+        dev.add_tags_to_track(id1, cat, &["Techno", "Dub", "Techno"])
             .unwrap();
-        dev.add_tags_to_track(id2, cat, &["Dub".into(), "House".into()])
-            .unwrap();
+        dev.add_tags_to_track(id2, cat, &["Dub", "House"]).unwrap();
         dev.save().unwrap();
 
         let mut ext_db = Database::open(
@@ -2114,7 +2113,7 @@ mod tests {
         let mut dev = DeviceExport::create(&dir).unwrap();
         let cat = dev.create_tag_category("My Tags").unwrap();
         let err = dev
-            .add_tags_to_track(TrackId(999), cat, &["x".into()])
+            .add_tags_to_track(TrackId(999), cat, &["x"])
             .unwrap_err();
         assert!(
             matches!(err, Error::UnknownForeignKey { kind, id } if kind == ForeignKeyKind::Track && id == 999),
@@ -2142,7 +2141,7 @@ mod tests {
         let id = dev.add_track(&t).unwrap().id;
 
         let err = dev
-            .add_tags_to_track(id, TagCategoryId(999), &["x".into()])
+            .add_tags_to_track(id, TagCategoryId(999), &["x"])
             .unwrap_err();
         assert!(
             matches!(err, Error::UnknownForeignKey { kind, id } if kind == ForeignKeyKind::TagCategory && id == 999),
@@ -2150,7 +2149,7 @@ mod tests {
         );
         // The track FK is checked before the category FK, so a bad track id reports Track first.
         let err = dev
-            .add_tags_to_track(TrackId(888), TagCategoryId(999), &["x".into()])
+            .add_tags_to_track(TrackId(888), TagCategoryId(999), &["x"])
             .unwrap_err();
         assert!(
             matches!(err, Error::UnknownForeignKey { kind, id } if kind == ForeignKeyKind::Track && id == 888),
@@ -2179,8 +2178,7 @@ mod tests {
 
         // No category yet, so the ext PDB must not exist even after an all-empty-labels call.
         let cat = dev.create_tag_category("My Tags").unwrap();
-        dev.add_tags_to_track(id, cat, &["".into(), "".into()])
-            .unwrap();
+        dev.add_tags_to_track(id, cat, &["", ""]).unwrap();
         // The category write already created exportExt.pdb; count its rows instead of asserting
         // absence.
         dev.save().unwrap();
@@ -2216,15 +2214,14 @@ mod tests {
         };
         let id = dev.add_track(&t).unwrap().id;
         let cat = dev.create_tag_category("My Tags").unwrap();
-        dev.add_tags_to_track(id, cat, &["Techno".into(), "Dub".into()])
-            .unwrap();
+        dev.add_tags_to_track(id, cat, &["Techno", "Dub"]).unwrap();
         dev.save().unwrap();
 
         // Reopen and append a new leaf under the existing category plus a brand-new category.
         let mut dev = DeviceExport::open(&dir).unwrap();
-        dev.add_tags_to_track(id, cat, &["House".into()]).unwrap();
+        dev.add_tags_to_track(id, cat, &["House"]).unwrap();
         let cat2 = dev.create_tag_category("Mood").unwrap();
-        dev.add_tags_to_track(id, cat2, &["Dark".into()]).unwrap();
+        dev.add_tags_to_track(id, cat2, &["Dark"]).unwrap();
         dev.save().unwrap();
 
         let mut ext_db = Database::open(
