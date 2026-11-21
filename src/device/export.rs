@@ -1041,6 +1041,14 @@ impl DeviceExport {
         let thumbnail = encode(&img, 80)?;
         let medium = encode(&img, 240)?;
 
+        // The file names derive from the artwork id. Skip any id whose path a caller-supplied
+        // `Track::artwork_path` already claimed, so the import never shares (or overwrites) it.
+        while self
+            .artwork_by_path
+            .contains_key(&artwork_device_path(self.next_artwork_id))
+        {
+            self.next_artwork_id += 1;
+        }
         let id = self.next_artwork_id;
         let device_path = artwork_device_path(id);
         let row_id = self.get_or_create_artwork(&device_path)?;
@@ -1764,6 +1772,30 @@ mod tests {
             1,
             "dedup must keep exactly one Artwork row on disk"
         );
+    }
+
+    // An import never lands on a path a caller already put in `Track::artwork_path`.
+    #[cfg(feature = "artwork")]
+    #[test]
+    fn import_artwork_skips_paths_claimed_by_callers() {
+        let dir = TestDir::new("artwork-claimed");
+        let src = dir.join("cover.png");
+        write_test_image(&src, 100, 100);
+
+        let mut dev = DeviceExport::create(&dir).unwrap();
+        // Takes artwork id 1, but names the file the next import would otherwise derive (id 2).
+        let claimed = "/PIONEER/Artwork/00001/a2.jpg";
+        dev.add_track(&Track {
+            artwork_path: claimed.into(),
+            ..track("song")
+        })
+        .unwrap();
+
+        assert_eq!(
+            dev.import_artwork(&src).unwrap(),
+            "/PIONEER/Artwork/00001/a3.jpg"
+        );
+        assert_eq!(rows::<Artwork>(&mut dev.db).len(), 2);
     }
 
     // A caller-supplied artwork_path is stored verbatim; no files are written.
